@@ -25,6 +25,40 @@
   line-height: 1.45;
 }
 
+nav.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+nav.tabs .tab {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--btn-bg);
+  color: var(--text);
+  padding: 0.45rem 0.85rem;
+  font-size: 0.875rem;
+}
+
+nav.tabs .tab:hover {
+  background: var(--btn-hover);
+}
+
+nav.tabs .tab.tab-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+nav.tabs .tab.tab-active:hover {
+  filter: brightness(1.05);
+}
+
 section.panel {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -39,9 +73,235 @@ section.panel h2 {
   margin: 0 0 0.75rem;
 }
 
+h3.panel-subh {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.5rem;
+}
+
+h3.panel-subh:first-of-type {
+  margin-top: 0.75rem;
+}
+
+h4.analytics-period-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 1rem 0 0.35rem;
+}
+
+.analytics-period:first-of-type h4.analytics-period-title {
+  margin-top: 0.35rem;
+}
+
+h4.analytics-subh {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 1rem 0 0.35rem;
+  color: var(--muted);
+}
+
+.compare-plan-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+  color: var(--muted);
+}
+
+p.compare-diff {
+  margin-top: 0.65rem;
+}
+
+.analytics-table-wrap {
+  max-height: min(28rem, 60vh);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+}
+
+.analytics-table-wrap .analytics-table {
+  margin-bottom: 0;
+}
+
+.analytics-table-wrap .analytics-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+p.rolling-summary-samples {
+  margin-top: 0.35rem;
+  margin-bottom: 1rem;
+  font-size: 0.78rem;
+}
+
+td.rolling-max-cell {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 0.12em;
+}
+
+@media (max-width: 720px) {
+  table.rolling-summary-table {
+    font-size: 0.72rem;
+  }
+  table.rolling-summary-table th,
+  table.rolling-summary-table td {
+    padding: 0.25rem 0.3rem;
+  }
+}
+
 .muted {
   color: var(--muted);
   font-size: 0.85rem;
+}
+
+ol.sim-steps {
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.35rem;
+  line-height: 1.5;
+}
+
+ol.sim-steps li {
+  margin-bottom: 0.4rem;
+}
+
+.dataset-kind {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.sim-run-row {
+  align-items: center;
+}
+
+.sim-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.sim-busy-spinner {
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: sim-spin 0.7s linear infinite;
+}
+
+@keyframes sim-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sim-results-panel {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.sim-results-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.88rem;
+}
+
+h3.sim-results-heading {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.sim-runs-table-wrap {
+  overflow-x: auto;
+  margin-top: 0.35rem;
+}
+
+table.sim-runs-table {
+  min-width: 720px;
+  font-size: 0.8rem;
+}
+
+table.sim-runs-table th,
+table.sim-runs-table td {
+  vertical-align: top;
+}
+
+table.sim-runs-table tbody tr {
+  cursor: pointer;
+}
+
+table.sim-runs-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+table.sim-runs-table tbody tr.sim-run-row-selected {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+table.sim-runs-table tbody tr.sim-run-row-selected:hover {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.sim-runs-actions-cell {
+  cursor: default;
+}
+
+.sim-run-detail-panel {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+h4.sim-run-detail-heading {
+  font-size: 0.92rem;
+  font-weight: 600;
+  margin: 0 0 0.35rem;
+}
+
+.sim-runs-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sim-runs-kwh-kind {
+  font-size: 0.72rem;
+  margin-left: 0.2rem;
+}
+
+.sim-run-time {
+  display: block;
+  font-weight: 500;
+}
+
+.sim-run-unsaved-badge {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.sim-runs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+button.sim-run-table-btn {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
 }
 
 .error-box {

@@ -5,7 +5,7 @@ import {
   maxRollingKwhForWindows,
   splitContiguousRuns,
   computeUsageAnalytics,
-  ROLLING_WINDOW_HOURS,
+  SUMMARY_WINDOW_HOURS,
 } from './usageAnalytics'
 import type { RatePeriod, RatePlan, UsageInterval } from './types'
 
@@ -79,8 +79,12 @@ describe('computeUsageAnalytics', () => {
     ]
     const [a] = computeUsageAnalytics(intervals, plan)
     expect(a.periodId).toBe('y')
-    expect(a.rollingMaxima.length).toBe(ROLLING_WINDOW_HOURS.length)
-    expect(a.dailyPercentiles.dayCount).toBe(2)
+    expect(a.rollingWindowSummary.length).toBe(SUMMARY_WINDOW_HOURS.length)
+    expect(a.rollingWindowSummary[0]!.max).toBeGreaterThanOrEqual(a.rollingWindowSummary[0]!.min)
+    const r0 = a.rollingWindowSummary[0]!
+    expect(r0.maxWindowStartMs).not.toBeNull()
+    expect(r0.maxWindowEndMs).not.toBeNull()
+    expect(r0.maxWindowEndMs!).toBeGreaterThanOrEqual(r0.maxWindowStartMs!)
     expect(a.peak).toBeDefined()
     expect(a.peak!.maxOneHourPeakKwh).toBe(2)
   })

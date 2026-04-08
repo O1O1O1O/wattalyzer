@@ -3,24 +3,65 @@ import { DateTime } from 'luxon'
 import './App.css'
 import { parseUsageCsv } from './lib/csvParse'
 import { resolveBillingTimeZone } from './lib/timezone'
-import type { RatePeriod, RatePlan, UsageDataset, Weekday } from './lib/types'
+import {
+  isEligibleSimulationInputDataset,
+  type RatePeriod,
+  type RatePlan,
+  type UsageDataset,
+  type Weekday,
+} from './lib/types'
 import { validateRatePlan } from './lib/ratePlanValidation'
-import { computeBill } from './lib/billing'
-import { computeUsageAnalytics } from './lib/usageAnalytics'
+import { computeBill, type BillSummary } from './lib/billing'
 import { daysInBillingMonth, MONTH_NAMES } from './lib/calendar'
 import {
   clearAllStores,
+  deleteBatteryBank,
   deleteDataset,
   deletePlan,
+  listBatteryBanks,
   listDatasets,
   listPlans,
+  putBatteryBank,
   putDataset,
   putPlan,
 } from './lib/db'
+import {
+  DEFAULT_BATTERY,
+  normalizeBatteryBank,
+  simulateBatteryGridUsage,
+  validateBattery,
+  type BatteryBankConfig,
+} from './lib/batterySimulation'
+import { BillGridUsageAnalytics } from './BillGridUsageAnalytics'
 
 const LS_DATASET = 'demand-shift-active-dataset'
 const LS_PLAN = 'demand-shift-active-plan'
-const LS_COMPARE = 'demand-shift-compare-plan'
+const LS_TAB = 'demand-shift-tab'
+const LS_SIM_SOURCE = 'demand-shift-sim-source'
+const LS_SIM_PLAN = 'demand-shift-sim-plan'
+const LS_SIM_BATTERY = 'demand-shift-sim-battery'
+
+const TAB_IDS = ['usage', 'plans', 'batteries', 'simulation'] as const
+type AppTab = (typeof TAB_IDS)[number]
+
+function parseTab(s: string | null): AppTab {
+  return TAB_IDS.includes(s as AppTab) ? (s as AppTab) : 'usage'
+}
+
+interface SimulationRunConfig {
+  sourceId: string
+  planId: string
+  batteryId: string | null
+}
+
+interface SimulationRunRecord {
+  id: string
+  createdAt: string
+  config: SimulationRunConfig
+  result: UsageDataset
+  /** Battery grid output not yet persisted to IndexedDB. */
+  unsaved: boolean
+}
 
 const WEEKDAYS: { bit: Weekday; label: string }[] = [
   { bit: 1, label: 'Mon' },
@@ -87,19 +128,22 @@ function emptyPlan(): RatePlan {
   }
 }
 
-function formatMoney(n: number): string {
+function emptyBattery(): BatteryBankConfig {
+  return {
+    id: newId(),
+    name: 'My battery bank',
+    ...DEFAULT_BATTERY,
+  }
+}
+
+function formatSimMoney(n: number): string {
   return n.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
 }
 
-function formatKwh(n: number): string {
-  return `${n.toFixed(3)} kWh`
-}
-
-function formatWindowRange(startMs: number, endMs: number, zone: string): string {
-  const a = DateTime.fromMillis(startMs, { zone })
-  const b = DateTime.fromMillis(endMs, { zone })
-  if (!a.isValid || !b.isValid) return '—'
-  return `${a.toFormat('MMM d, yyyy, h:mm a')} → ${b.toFormat('MMM d, yyyy, h:mm a')}`
+function pickSimulationSourceId(dsList: UsageDataset[], preferred: string | null): string | null {
+  const eligible = dsList.filter(isEligibleSimulationInputDataset)
+  if (preferred && eligible.some((d) => d.id === preferred)) return preferred
+  return eligible[0]?.id ?? null
 }
 
 function datasetRange(ds: UsageDataset): string {
@@ -118,33 +162,89 @@ function datasetRange(ds: UsageDataset): string {
 export default function App() {
   const [datasets, setDatasets] = useState<UsageDataset[]>([])
   const [plans, setPlans] = useState<RatePlan[]>([])
+  const [batteries, setBatteries] = useState<BatteryBankConfig[]>([])
+  const [activeTab, setActiveTab] = useState<AppTab>('usage')
   const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null)
   const [primaryPlanId, setPrimaryPlanId] = useState<string | null>(null)
-  const [comparePlanId, setComparePlanId] = useState<string | null>(null)
+  const [simSourceId, setSimSourceId] = useState<string | null>(null)
+  const [simPlanId, setSimPlanId] = useState<string | null>(null)
+  const [simBatteryId, setSimBatteryId] = useState<string | null>(null)
+  const [simulationRuns, setSimulationRuns] = useState<SimulationRunRecord[]>([])
+  /** Which simulation result row shows full bill + sliding-window / peak analytics below. */
+  const [selectedSimulationDetailRunId, setSelectedSimulationDetailRunId] = useState<string | null>(
+    null,
+  )
+  const [simBusy, setSimBusy] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploadWarnings, setUploadWarnings] = useState<string[]>([])
   const [planErrors, setPlanErrors] = useState<string[]>([])
+  const [batteryErrors, setBatteryErrors] = useState<string[]>([])
   const [draftPlan, setDraftPlan] = useState<RatePlan | null>(null)
+  const [draftBattery, setDraftBattery] = useState<BatteryBankConfig | null>(null)
+  /** In-memory label while typing; persisted on blur only (avoids IDB + full reload per keystroke). */
+  const [datasetLabelDraftById, setDatasetLabelDraftById] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    const ids = new Set(datasets.map((d) => d.id))
+    setDatasetLabelDraftById((prev) => {
+      let changed = false
+      const next = { ...prev }
+      for (const k of Object.keys(next)) {
+        if (!ids.has(k)) {
+          delete next[k]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [datasets])
 
   const reloadStores = useCallback(async () => {
-    const [ds, ps] = await Promise.all([listDatasets(), listPlans()])
+    const [ds, ps, bsRaw] = await Promise.all([listDatasets(), listPlans(), listBatteryBanks()])
+    const bs = bsRaw.map(normalizeBatteryBank)
     setDatasets(ds)
     setPlans(ps)
+    setBatteries(bs)
     setActiveDatasetId((cur) => (cur && ds.some((d) => d.id === cur) ? cur : ds[0]?.id ?? null))
     setPrimaryPlanId((cur) => (cur && ps.some((p) => p.id === cur) ? cur : ps[0]?.id ?? null))
+    setSimSourceId((cur) => pickSimulationSourceId(ds, cur))
+    setSimPlanId((cur) =>
+      cur && ps.some((p) => p.id === cur) ? cur : (ps[0]?.id ?? null),
+    )
+    setSimBatteryId((cur) => {
+      if (cur && bs.some((b) => b.id === cur)) return cur
+      if (cur === null) return null
+      return bs[0]?.id ?? null
+    })
   }, [])
 
   useEffect(() => {
     void (async () => {
-      const [ds, ps] = await Promise.all([listDatasets(), listPlans()])
+      const [ds, ps, bsRaw] = await Promise.all([listDatasets(), listPlans(), listBatteryBanks()])
+      const bs = bsRaw.map(normalizeBatteryBank)
       setDatasets(ds)
       setPlans(ps)
+      setBatteries(bs)
       const ad = localStorage.getItem(LS_DATASET)
       const ap = localStorage.getItem(LS_PLAN)
-      const cp = localStorage.getItem(LS_COMPARE)
-      setActiveDatasetId(ad && ds.some((d) => d.id === ad) ? ad : ds[0]?.id ?? null)
-      setPrimaryPlanId(ap && ps.some((p) => p.id === ap) ? ap : ps[0]?.id ?? null)
-      setComparePlanId(cp && ps.some((p) => p.id === cp) ? cp : null)
+      const activeId = ad && ds.some((d) => d.id === ad) ? ad : ds[0]?.id ?? null
+      const primaryId = ap && ps.some((p) => p.id === ap) ? ap : ps[0]?.id ?? null
+      setActiveDatasetId(activeId)
+      setPrimaryPlanId(primaryId)
+      setActiveTab(parseTab(localStorage.getItem(LS_TAB)))
+      const ss = localStorage.getItem(LS_SIM_SOURCE)
+      const sp = localStorage.getItem(LS_SIM_PLAN)
+      const sb = localStorage.getItem(LS_SIM_BATTERY)
+      const simPrefRaw = ss && ds.some((d) => d.id === ss) ? ss : activeId
+      const simPref =
+        simPrefRaw &&
+        ds.some((d) => d.id === simPrefRaw) &&
+        isEligibleSimulationInputDataset(ds.find((d) => d.id === simPrefRaw)!)
+          ? simPrefRaw
+          : null
+      setSimSourceId(pickSimulationSourceId(ds, simPref))
+      setSimPlanId(sp && ps.some((p) => p.id === sp) ? sp : primaryId)
+      setSimBatteryId(sb && bs.some((b) => b.id === sb) ? sb : bs[0]?.id ?? null)
     })()
   }, [])
 
@@ -159,54 +259,81 @@ export default function App() {
   }, [primaryPlanId])
 
   useEffect(() => {
-    if (comparePlanId) localStorage.setItem(LS_COMPARE, comparePlanId)
-    else localStorage.removeItem(LS_COMPARE)
-  }, [comparePlanId])
+    localStorage.setItem(LS_TAB, activeTab)
+  }, [activeTab])
+
+  useEffect(() => {
+    if (simSourceId) localStorage.setItem(LS_SIM_SOURCE, simSourceId)
+    else localStorage.removeItem(LS_SIM_SOURCE)
+  }, [simSourceId])
+
+  useEffect(() => {
+    if (simPlanId) localStorage.setItem(LS_SIM_PLAN, simPlanId)
+    else localStorage.removeItem(LS_SIM_PLAN)
+  }, [simPlanId])
+
+  useEffect(() => {
+    if (simBatteryId) localStorage.setItem(LS_SIM_BATTERY, simBatteryId)
+    else localStorage.removeItem(LS_SIM_BATTERY)
+  }, [simBatteryId])
 
   const activeDataset = useMemo(
     () => datasets.find((d) => d.id === activeDatasetId) ?? null,
     [datasets, activeDatasetId],
   )
+
   const primaryPlan = useMemo(
     () => plans.find((p) => p.id === primaryPlanId) ?? null,
     [plans, primaryPlanId],
   )
-  const comparePlan = useMemo(
-    () => plans.find((p) => p.id === comparePlanId) ?? null,
-    [plans, comparePlanId],
+
+  const selectedSimDetailRun = useMemo(
+    () => simulationRuns.find((r) => r.id === selectedSimulationDetailRunId) ?? null,
+    [simulationRuns, selectedSimulationDetailRunId],
   )
 
-  const primaryBill = useMemo(() => {
-    if (!activeDataset || !primaryPlan) return null
-    const planTz = {
-      ...primaryPlan,
-      billingTimeZone: activeDataset.billingTimeZone || primaryPlan.billingTimeZone,
-    }
-    return computeBill(activeDataset.intervals, planTz)
-  }, [activeDataset, primaryPlan])
+  const selectedSimDetailPlan = useMemo(() => {
+    if (!selectedSimDetailRun) return null
+    return plans.find((p) => p.id === selectedSimDetailRun.config.planId) ?? null
+  }, [selectedSimDetailRun, plans])
 
-  const compareBill = useMemo(() => {
-    if (!activeDataset || !comparePlan) return null
-    const planTz = {
-      ...comparePlan,
-      billingTimeZone: activeDataset.billingTimeZone || comparePlan.billingTimeZone,
+  useEffect(() => {
+    if (
+      selectedSimulationDetailRunId &&
+      !simulationRuns.some((r) => r.id === selectedSimulationDetailRunId)
+    ) {
+      setSelectedSimulationDetailRunId(null)
     }
-    return computeBill(activeDataset.intervals, planTz)
-  }, [activeDataset, comparePlan])
+  }, [simulationRuns, selectedSimulationDetailRunId])
 
-  const usageAnalytics = useMemo(() => {
-    if (!activeDataset || !primaryPlan) return null
-    const planTz = {
-      ...primaryPlan,
-      billingTimeZone: activeDataset.billingTimeZone || primaryPlan.billingTimeZone,
-    }
-    return computeUsageAnalytics(activeDataset.intervals, planTz)
-  }, [activeDataset, primaryPlan])
+  const simulationRunTableRows = useMemo(() => {
+    return simulationRuns.map((run) => {
+      const plan = plans.find((p) => p.id === run.config.planId) ?? null
+      const srcDataset = datasets.find((d) => d.id === run.config.sourceId) ?? null
+      const battery =
+        run.config.batteryId != null
+          ? (batteries.find((b) => b.id === run.config.batteryId) ?? null)
+          : null
 
-  const billingZoneLabel =
-    activeDataset && primaryPlan
-      ? activeDataset.billingTimeZone || primaryPlan.billingTimeZone
-      : 'America/Los_Angeles'
+      let bill: BillSummary | null = null
+      if (plan) {
+        const planTz = {
+          ...plan,
+          billingTimeZone: run.result.billingTimeZone || plan.billingTimeZone,
+        }
+        bill = computeBill(run.result.intervals, planTz)
+      }
+
+      return {
+        run,
+        bill,
+        inputLabel: srcDataset?.label ?? '— (dataset removed)',
+        planLabel: plan?.name ?? '— (plan removed)',
+        batteryLabel:
+          run.config.batteryId == null ? 'None' : (battery?.name ?? '— (battery removed)'),
+      }
+    })
+  }, [simulationRuns, plans, datasets, batteries])
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -236,12 +363,12 @@ export default function App() {
     setActiveDatasetId(ds.id)
   }
 
-  const onRenameDataset = async (id: string, label: string) => {
+  const persistDatasetLabel = useCallback(async (id: string, label: string) => {
     const ds = datasets.find((d) => d.id === id)
-    if (!ds) return
+    if (!ds || ds.label === label) return
     await putDataset({ ...ds, label })
-    await reloadStores()
-  }
+    setDatasets((prev) => prev.map((x) => (x.id === id ? { ...x, label } : x)))
+  }, [datasets])
 
   const onDeleteDataset = async (id: string) => {
     if (!window.confirm('Remove this dataset from this browser?')) return
@@ -282,20 +409,168 @@ export default function App() {
     await deletePlan(id)
     await reloadStores()
     if (primaryPlanId === id) setPrimaryPlanId(null)
-    if (comparePlanId === id) setComparePlanId(null)
+    if (simPlanId === id) setSimPlanId(null)
+  }
+
+  const openNewBattery = () => {
+    setBatteryErrors([])
+    setDraftBattery(emptyBattery())
+  }
+
+  const openEditBattery = (b: BatteryBankConfig) => {
+    setBatteryErrors([])
+    setDraftBattery(structuredClone(normalizeBatteryBank(b)))
+  }
+
+  const saveDraftBattery = async () => {
+    if (!draftBattery) return
+    const normalized = normalizeBatteryBank(draftBattery)
+    const errs = validateBattery(normalized)
+    setBatteryErrors(errs)
+    if (errs.length > 0) return
+    await putBatteryBank(normalized)
+    await reloadStores()
+    setSimBatteryId(normalized.id)
+    setDraftBattery(null)
+  }
+
+  const removeBattery = async (id: string) => {
+    if (!window.confirm('Delete this battery configuration?')) return
+    await deleteBatteryBank(id)
+    await reloadStores()
+  }
+
+  const onRenameBattery = async (id: string, name: string) => {
+    const b = batteries.find((x) => x.id === id)
+    if (!b) return
+    await putBatteryBank({ ...b, name })
+    await reloadStores()
+  }
+
+  const runSimulation = async () => {
+    setSimBusy(true)
+    await new Promise((r) => setTimeout(r, 0))
+    try {
+      const src = datasets.find((d) => d.id === simSourceId)
+      const plan = plans.find((p) => p.id === simPlanId)
+      const bat = simBatteryId ? batteries.find((b) => b.id === simBatteryId) : undefined
+      if (!src || !plan) return
+      if (simBatteryId && !bat) return
+      if (!isEligibleSimulationInputDataset(src)) return
+
+      const runId = newId()
+      const createdAt = new Date().toISOString()
+      const tabStamp = DateTime.fromISO(createdAt).toFormat('MMM d, h:mm a')
+
+      const config: SimulationRunConfig = {
+        sourceId: src.id,
+        planId: plan.id,
+        batteryId: bat ? bat.id : null,
+      }
+
+      if (!bat) {
+        setBatteryErrors([])
+        const tabTitle = `${tabStamp} · Site demand`
+        const result: UsageDataset = {
+          ...src,
+          id: `sim-run-${runId}`,
+          label: `${tabTitle} — ${src.label}`,
+          sourceFilename: src.sourceFilename,
+          importedAt: createdAt,
+          intervals: src.intervals,
+          csvTimeZone: src.csvTimeZone,
+          billingTimeZone: src.billingTimeZone || plan.billingTimeZone,
+          isSimulationGridOutput: false,
+        }
+        const newRun: SimulationRunRecord = {
+          id: runId,
+          createdAt,
+          config,
+          result,
+          unsaved: false,
+        }
+        setSimulationRuns((prev) => [...prev, newRun])
+        setSelectedSimulationDetailRunId(runId)
+        return
+      }
+
+      const batN = normalizeBatteryBank(bat)
+      const verr = validateBattery(batN)
+      if (verr.length > 0) {
+        setBatteryErrors(verr)
+        return
+      }
+      setBatteryErrors([])
+
+      const planForSim = {
+        ...plan,
+        billingTimeZone: src.billingTimeZone || plan.billingTimeZone,
+      }
+      const intervals = simulateBatteryGridUsage(src.intervals, planForSim, batN)
+      const sourceFilenameBase = `simulation:${src.id}:${batN.id}`
+      const result: UsageDataset = {
+        id: `sim-unsaved-${runId}`,
+        label: `Sim: ${src.label} + ${batN.name}`,
+        sourceFilename: `${sourceFilenameBase} (preview)`,
+        importedAt: createdAt,
+        intervals,
+        csvTimeZone: src.csvTimeZone,
+        billingTimeZone: src.billingTimeZone || plan.billingTimeZone,
+        isSimulationGridOutput: true,
+      }
+      const newRun: SimulationRunRecord = {
+        id: runId,
+        createdAt,
+        config,
+        result,
+        unsaved: true,
+      }
+      setSimulationRuns((prev) => [...prev, newRun])
+      setSelectedSimulationDetailRunId(runId)
+    } finally {
+      setSimBusy(false)
+    }
+  }
+
+  const saveBatterySimulationPreview = async (runId: string) => {
+    const run = simulationRuns.find((r) => r.id === runId)
+    if (!run?.unsaved) return
+    const p = run.result
+    const sourceFilename = p.sourceFilename.replace(/\s*\(preview\)\s*$/, '')
+    const newDs: UsageDataset = {
+      ...p,
+      id: newId(),
+      sourceFilename,
+      importedAt: new Date().toISOString(),
+      isSimulationGridOutput: true,
+    }
+    await putDataset(newDs)
+    await reloadStores()
+    setSimulationRuns((prev) =>
+      prev.map((r) => (r.id === run.id ? { ...r, result: newDs, unsaved: false } : r)),
+    )
+  }
+
+  const removeSimulationRun = (runId: string) => {
+    setSimulationRuns((prev) => prev.filter((r) => r.id !== runId))
+    setSelectedSimulationDetailRunId((cur) => (cur === runId ? null : cur))
   }
 
   const clearEverything = async () => {
     if (
       !window.confirm(
-        'Delete all usage datasets and rate plans stored in this browser for Demand Shift?',
+        'Delete all usage datasets, rate plans, and battery configurations stored in this browser for Demand Shift?',
       )
     )
       return
     await clearAllStores()
     setActiveDatasetId(null)
     setPrimaryPlanId(null)
-    setComparePlanId(null)
+    setSimulationRuns([])
+    setSelectedSimulationDetailRunId(null)
+    localStorage.removeItem(LS_SIM_SOURCE)
+    localStorage.removeItem(LS_SIM_PLAN)
+    localStorage.removeItem(LS_SIM_BATTERY)
     await reloadStores()
   }
 
@@ -358,18 +633,56 @@ export default function App() {
       <header className="app-header">
         <h1>Demand Shift</h1>
         <p>
-          Estimate electricity cost from your usage CSV and your rate plan. Everything stays in
-          your browser—no account, no upload to our servers.
+          Model site demand and rate plans, compare costs, and optionally simulate battery storage and
+          grid import. Everything stays in your browser—no account, no upload to our servers.
         </p>
       </header>
 
+      <nav className="tabs" aria-label="Main sections">
+        <button
+          type="button"
+          className={`tab${activeTab === 'usage' ? ' tab-active' : ''}`}
+          onClick={() => setActiveTab('usage')}
+        >
+          Usage data
+        </button>
+        <button
+          type="button"
+          className={`tab${activeTab === 'plans' ? ' tab-active' : ''}`}
+          onClick={() => setActiveTab('plans')}
+        >
+          Rate plans
+        </button>
+        <button
+          type="button"
+          className={`tab${activeTab === 'batteries' ? ' tab-active' : ''}`}
+          onClick={() => setActiveTab('batteries')}
+        >
+          Battery banks
+        </button>
+        <button
+          type="button"
+          className={`tab${activeTab === 'simulation' ? ' tab-active' : ''}`}
+          onClick={() => setActiveTab('simulation')}
+        >
+          Simulation
+        </button>
+      </nav>
+
+      {activeTab === 'usage' && (
       <section className="panel">
         <h2>Usage data</h2>
         <p className="muted">
           CSV must include <code>Usage</code>, <code>TimeZone</code>, and either{' '}
           <code>startTime</code>/<code>endTime</code> or the split date/time columns. Invalid rows
-          are rejected. If a <code>Cost</code> column exists, values are saved per row (empty cells
-          are treated as 0); billing still uses your rate plan, not CSV cost.
+          are rejected. Each row’s kWh is treated as <strong>site demand</strong> (total household
+          load for that interval)—the input expected for battery simulation. If a <code>Cost</code>{' '}
+          column exists, values are stored per row but are not used on this tab.
+        </p>
+        <p className="muted">
+          Datasets saved from a battery run contain <strong>grid import</strong> kWh only (net meter
+          draw after the battery). Those rows are labeled below and are <strong>not</strong> offered as
+          simulation inputs.
         </p>
         <div className="row">
           <label className="file-btn">
@@ -401,14 +714,30 @@ export default function App() {
                   />
                   <input
                     type="text"
-                    value={d.label}
-                    onChange={(e) => void onRenameDataset(d.id, e.target.value)}
+                    value={datasetLabelDraftById[d.id] ?? d.label}
+                    onChange={(e) =>
+                      setDatasetLabelDraftById((prev) => ({ ...prev, [d.id]: e.target.value }))
+                    }
+                    onBlur={(e) => {
+                      const raw = e.currentTarget.value.trim()
+                      const next = raw.length > 0 ? raw : d.label
+                      setDatasetLabelDraftById((prev) => {
+                        const { [d.id]: _, ...rest } = prev
+                        return rest
+                      })
+                      void persistDatasetLabel(d.id, next)
+                    }}
                     aria-label="Dataset name"
                   />
                 </label>
                 <span className="muted">
                   {d.intervals.length.toLocaleString()} intervals · {datasetRange(d)}
                 </span>
+                {d.isSimulationGridOutput ? (
+                  <span className="dataset-kind">Grid import (sim output)</span>
+                ) : (
+                  <span className="dataset-kind">Site demand (sim input)</span>
+                )}
                 <span className="muted">CSV TZ: {d.csvTimeZone || '—'}</span>
                 <label className="inline">
                   Bill in
@@ -427,13 +756,11 @@ export default function App() {
             ))}
           </ul>
         )}
-        <datalist id="iana-list">
-          {IANA_SUGGESTIONS.map((z) => (
-            <option key={z} value={z} />
-          ))}
-        </datalist>
       </section>
+      )}
 
+      {activeTab === 'plans' && (
+      <>
       <section className="panel">
         <h2>Rate plans</h2>
         <p className="muted">
@@ -454,9 +781,6 @@ export default function App() {
                 <span className="muted">{p.billingTimeZone}</span>
                 <button type="button" onClick={() => openEditPlan(p)}>
                   Edit
-                </button>
-                <button type="button" onClick={() => setPrimaryPlanId(p.id)}>
-                  Use for results
                 </button>
                 <button type="button" className="danger" onClick={() => void removePlan(p.id)}>
                   Delete
@@ -676,193 +1000,237 @@ export default function App() {
           )}
         </section>
       )}
+      </>
+      )}
 
+      {activeTab === 'batteries' && (
+      <>
       <section className="panel">
-        <h2>Results</h2>
-        {!activeDataset || !primaryPlan ? (
-          <p className="muted">Select a dataset and a rate plan to see totals.</p>
-        ) : (
-          <>
-            {primaryBill && primaryBill.uncoveredIntervals > 0 && (
-              <p className="muted">
-                {primaryBill.uncoveredIntervals} intervals could not be matched to a period (check
-                dates vs plan).
-              </p>
-            )}
-            {primaryBill && (
-              <div className="results-grid">
-                <div className="stat">
-                  <div className="label">Total cost</div>
-                  <div className="value">{formatMoney(primaryBill.totalCost)}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Total kWh</div>
-                  <div className="value">{primaryBill.totalKwh.toFixed(2)}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Base cost</div>
-                  <div className="value">{formatMoney(primaryBill.baseCost)}</div>
-                </div>
-                <div className="stat">
-                  <div className="label">Peak cost</div>
-                  <div className="value">{formatMoney(primaryBill.peakCost)}</div>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>Usage by rate period</h2>
-        {!activeDataset || !primaryPlan ? (
-          <p className="muted">Select a dataset and plan to see per-period usage analytics.</p>
-        ) : (
-          <>
-            <p className="muted">
-              Rolling totals use <strong>contiguous</strong> intervals (gaps over 2 minutes start a
-              new run). If one interval is longer than the window, its share is prorated. Daily
-              figures group by interval <strong>start</strong> in the billing zone; percentiles use
-              every calendar day from the first to last in-range day in that period (zero kWh if no
-              rows). Peak stats use the same peak windows as cost.
-            </p>
-            {usageAnalytics?.map((pa) => (
-              <div key={pa.periodId} className="analytics-period">
-                <h3>Period {pa.periodLabel}</h3>
-                <table className="analytics-table">
-                  <caption>Maximum kWh in any sliding window</caption>
-                  <thead>
-                    <tr>
-                      <th>Window</th>
-                      <th>kWh</th>
-                      <th>Window (local)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pa.rollingMaxima.map((r) => (
-                      <tr key={r.windowHours}>
-                        <td>{r.windowHours} h</td>
-                        <td>{formatKwh(r.kwh)}</td>
-                        <td className="nowrap">
-                          {formatWindowRange(r.windowStartMs, r.windowEndMs, billingZoneLabel)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                <table className="analytics-table">
-                  <caption>Daily total kWh (all hours)</caption>
-                  <thead>
-                    <tr>
-                      <th>Statistic</th>
-                      <th>kWh</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr>
-                      <td>Median</td>
-                      <td>{formatKwh(pa.dailyPercentiles.median)}</td>
-                    </tr>
-                    <tr>
-                      <td>75th percentile</td>
-                      <td>{formatKwh(pa.dailyPercentiles.p75)}</td>
-                    </tr>
-                    <tr>
-                      <td>90th percentile</td>
-                      <td>{formatKwh(pa.dailyPercentiles.p90)}</td>
-                    </tr>
-                    <tr>
-                      <td>95th percentile</td>
-                      <td>{formatKwh(pa.dailyPercentiles.p95)}</td>
-                    </tr>
-                    <tr>
-                      <td>Days in sample</td>
-                      <td>{pa.dailyPercentiles.dayCount}</td>
-                    </tr>
-                  </tbody>
-                </table>
-                {pa.peak && (
-                  <table className="analytics-table">
-                    <caption>Peak window only (same rules as billing)</caption>
-                    <thead>
-                      <tr>
-                        <th>Statistic</th>
-                        <th>Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>Median daily kWh (peak hours)</td>
-                        <td>{formatKwh(pa.peak.dailyPercentiles.median)}</td>
-                      </tr>
-                      <tr>
-                        <td>75th percentile</td>
-                        <td>{formatKwh(pa.peak.dailyPercentiles.p75)}</td>
-                      </tr>
-                      <tr>
-                        <td>90th percentile</td>
-                        <td>{formatKwh(pa.peak.dailyPercentiles.p90)}</td>
-                      </tr>
-                      <tr>
-                        <td>95th percentile</td>
-                        <td>{formatKwh(pa.peak.dailyPercentiles.p95)}</td>
-                      </tr>
-                      <tr>
-                        <td>Days in peak sample</td>
-                        <td>{pa.peak.dailyPercentiles.dayCount}</td>
-                      </tr>
-                      <tr>
-                        <td>Max daily kWh (peak hours)</td>
-                        <td>
-                          {formatKwh(pa.peak.maxDailyPeakKwh)}
-                          {pa.peak.maxDailyPeakDate ? (
-                            <span className="muted">
-                              {' '}
-                              (
-                              {DateTime.fromISO(pa.peak.maxDailyPeakDate, {
-                                zone: billingZoneLabel,
-                              }).toFormat('MMM d, yyyy')}
-                              )
-                            </span>
-                          ) : null}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td>Max 1 h usage (peak hours only)</td>
-                        <td>
-                          {formatKwh(pa.peak.maxOneHourPeakKwh)}
-                          {pa.peak.maxOneHourPeakWindowStartMs != null ? (
-                            <span className="muted">
-                              {' '}
-                              (
-                              {formatWindowRange(
-                                pa.peak.maxOneHourPeakWindowStartMs,
-                                pa.peak.maxOneHourPeakWindowEndMs ??
-                                  pa.peak.maxOneHourPeakWindowStartMs + 3600 * 1000,
-                                billingZoneLabel,
-                              )}
-                              )
-                            </span>
-                          ) : null}
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                )}
-              </div>
+        <h2>Battery banks</h2>
+        <p className="muted">
+          Total capacity is nameplate kWh. Min/max SOC bound usable energy (defaults 10%–90%). Charging
+          efficiency is grid-to-stored; AC conversion is stored DC to AC at the home. Max charge rate
+          limits grid-to-battery power; max power out limits AC from the battery to the home (SOC falls
+          by delivered AC kWh ÷ η_ac). The simulator never charges during peak; it recharges toward max
+          SOC off-peak after peaks end.
+        </p>
+        <div className="row">
+          <button type="button" className="primary" onClick={openNewBattery}>
+            New battery bank
+          </button>
+        </div>
+        {batteries.length > 0 && (
+          <ul className="plan-list">
+            {batteries.map((b) => (
+              <li key={b.id}>
+                <input
+                  type="text"
+                  value={b.name}
+                  onChange={(e) => void onRenameBattery(b.id, e.target.value)}
+                  aria-label="Battery name"
+                  style={{ minWidth: '10rem' }}
+                />
+                <span className="muted">
+                  {b.totalCapacityKwh} kWh · {b.minSocPercent}–{b.maxSocPercent}% SOC ·{' '}
+                  {b.maxChargeKw} kW in / {b.maxPowerOutKw} kW out
+                </span>
+                <button type="button" onClick={() => openEditBattery(b)}>
+                  Edit
+                </button>
+                <button type="button" className="danger" onClick={() => void removeBattery(b.id)}>
+                  Delete
+                </button>
+              </li>
             ))}
-          </>
+          </ul>
         )}
       </section>
 
+      {draftBattery && (
+        <section className="panel">
+          <h2>
+            {batteries.some((x) => x.id === draftBattery.id) ? 'Edit battery bank' : 'New battery bank'}
+          </h2>
+          <div className="row">
+            <label className="inline">
+              Name
+              <input
+                type="text"
+                value={draftBattery.name}
+                onChange={(e) => setDraftBattery({ ...draftBattery, name: e.target.value })}
+              />
+            </label>
+            <label className="inline">
+              Total capacity (kWh)
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                value={draftBattery.totalCapacityKwh}
+                onChange={(e) =>
+                  setDraftBattery({
+                    ...draftBattery,
+                    totalCapacityKwh: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="row">
+            <label className="inline">
+              Min SOC (%)
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="100"
+                value={draftBattery.minSocPercent}
+                onChange={(e) =>
+                  setDraftBattery({
+                    ...draftBattery,
+                    minSocPercent: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label className="inline">
+              Max SOC (%)
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="100"
+                value={draftBattery.maxSocPercent}
+                onChange={(e) =>
+                  setDraftBattery({
+                    ...draftBattery,
+                    maxSocPercent: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label className="inline">
+              Charging efficiency (%)
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                max="100"
+                value={draftBattery.chargeEfficiencyPercent}
+                onChange={(e) =>
+                  setDraftBattery({
+                    ...draftBattery,
+                    chargeEfficiencyPercent: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label className="inline">
+              AC conversion (%)
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                max="100"
+                value={draftBattery.acConversionPercent}
+                onChange={(e) =>
+                  setDraftBattery({
+                    ...draftBattery,
+                    acConversionPercent: Number(e.target.value),
+                  })
+                }
+              />
+            </label>
+            <label className="inline">
+              Max charge rate (kW)
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={draftBattery.maxChargeKw}
+                onChange={(e) =>
+                  setDraftBattery({ ...draftBattery, maxChargeKw: Number(e.target.value) })
+                }
+              />
+            </label>
+            <label className="inline">
+              Max power out (kW)
+              <input
+                type="number"
+                step="0.1"
+                min="0"
+                value={draftBattery.maxPowerOutKw}
+                onChange={(e) =>
+                  setDraftBattery({ ...draftBattery, maxPowerOutKw: Number(e.target.value) })
+                }
+              />
+            </label>
+          </div>
+          <div className="row">
+            <button type="button" className="primary" onClick={() => void saveDraftBattery()}>
+              Save battery bank
+            </button>
+            <button type="button" onClick={() => setDraftBattery(null)}>
+              Cancel
+            </button>
+          </div>
+          {batteryErrors.length > 0 && (
+            <div className="error-box">{batteryErrors.join('\n')}</div>
+          )}
+        </section>
+      )}
+      </>
+      )}
+
+      {activeTab === 'simulation' && (
       <section className="panel">
-        <h2>Compare plans</h2>
+        <h2>Simulation</h2>
+        <p className="muted">
+          Tie <strong>site demand</strong> to a <strong>rate plan</strong> for cost and{' '}
+          <strong>grid usage</strong> statistics, and optionally <strong>battery storage</strong> to get{' '}
+          <strong>grid import</strong> kWh per interval (demand minus battery contribution, within
+          inverter limits).
+        </p>
+        <ol className="sim-steps muted">
+          <li>
+            Select an <strong>input usage</strong> dataset: interval kWh are treated as{' '}
+            <strong>total site / household demand</strong>. Saved simulation outputs (grid import only)
+            are excluded from this list.
+          </li>
+          <li>Select the <strong>rate plan</strong> used for billing and window statistics for each run.</li>
+          <li>
+            Optionally select a <strong>battery bank</strong>. <strong>Simulate</strong> models SOC, no
+            charging during peak, recharge after peak, and max charge / max power out, producing{' '}
+            <strong>grid import</strong> kWh per interval. Use <strong>Save</strong> on that row in the
+            results table to store a battery preview as a dataset (not valid as a later simulation input).
+            With battery{' '}
+            <strong>None</strong>, each run records <strong>site demand</strong> against the chosen plan.
+          </li>
+          <li>
+            Each <strong>Simulate</strong> adds a row to the <strong>results table</strong> below with
+            inputs and bill summary so you can compare runs side by side.
+          </li>
+        </ol>
         <div className="row">
           <label className="inline">
-            Second plan
+            Input usage (site demand)
             <select
-              value={comparePlanId ?? ''}
-              onChange={(e) => setComparePlanId(e.target.value || null)}
+              value={simSourceId ?? ''}
+              onChange={(e) => setSimSourceId(e.target.value || null)}
+            >
+              <option value="">—</option>
+              {datasets.filter(isEligibleSimulationInputDataset).map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="inline">
+            Rate plan
+            <select
+              value={simPlanId ?? ''}
+              onChange={(e) => setSimPlanId(e.target.value || null)}
             >
               <option value="">—</option>
               {plans.map((p) => (
@@ -872,47 +1240,230 @@ export default function App() {
               ))}
             </select>
           </label>
+          <label className="inline">
+            Battery bank (optional)
+            <select
+              value={simBatteryId ?? ''}
+              onChange={(e) => setSimBatteryId(e.target.value || null)}
+            >
+              <option value="">None</option>
+              {batteries.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        {activeDataset && primaryPlan && comparePlan && primaryBill && compareBill && (
-          <div className="compare-columns">
-            <div>
-              <h3 className="muted" style={{ fontSize: '0.85rem', margin: '0 0 0.5rem' }}>
-                {primaryPlan.name}
-              </h3>
-              <div className="stat">
-                <div className="label">Total</div>
-                <div className="value">{formatMoney(primaryBill.totalCost)}</div>
-              </div>
-            </div>
-            <div>
-              <h3 className="muted" style={{ fontSize: '0.85rem', margin: '0 0 0.5rem' }}>
-                {comparePlan.name}
-              </h3>
-              <div className="stat">
-                <div className="label">Total</div>
-                <div className="value">{formatMoney(compareBill.totalCost)}</div>
-              </div>
-              <p className="muted" style={{ marginTop: '0.65rem' }}>
-                Difference:{' '}
-                {formatMoney(compareBill.totalCost - primaryBill.totalCost)} (
-                {primaryBill.totalCost !== 0
-                  ? `${(((compareBill.totalCost - primaryBill.totalCost) / primaryBill.totalCost) * 100).toFixed(1)}%`
-                  : '—'}
-                )
-              </p>
-            </div>
-          </div>
+        <div className="row sim-run-row">
+          <button
+            type="button"
+            className="primary"
+            disabled={simBusy || !simSourceId || !simPlanId}
+            onClick={() => void runSimulation()}
+          >
+            {simBusy ? 'Running…' : 'Simulate'}
+          </button>
+          {simBusy && (
+            <span className="sim-busy" role="status" aria-live="polite">
+              <span className="sim-busy-spinner" aria-hidden />
+              Working…
+            </span>
+          )}
+        </div>
+        {batteryErrors.length > 0 && (
+          <div className="error-box">{batteryErrors.join('\n')}</div>
         )}
+
+        <div className="sim-results-panel">
+          <h3 className="sim-results-heading">Simulation results</h3>
+          <p className="muted sim-results-hint">
+            Bill figures use each run&apos;s rate plan and interval kWh (site demand or modeled grid
+            import). <strong>Total kWh</strong> is billed energy for that run. Peak cost shows{' '}
+            <strong>—</strong> when there is no peak charge. <strong>Click a row</strong> to show full
+            analytics (estimated bill breakdown, sliding-window kWh distributions, peak-window stats).
+          </p>
+          {simulationRuns.length === 0 ? (
+            <p className="muted sim-results-hint">Run <strong>Simulate</strong> to add a comparison row.</p>
+          ) : (
+            <div className="sim-runs-table-wrap">
+              <table className="analytics-table sim-runs-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Run</th>
+                    <th scope="col">Input data</th>
+                    <th scope="col">Rate plan</th>
+                    <th scope="col">Battery</th>
+                    <th scope="col" className="sim-runs-num">
+                      Total cost
+                    </th>
+                    <th scope="col" className="sim-runs-num">
+                      Base cost
+                    </th>
+                    <th scope="col" className="sim-runs-num">
+                      Peak cost
+                    </th>
+                    <th scope="col" className="sim-runs-num">
+                      Total kWh
+                    </th>
+                    <th scope="col">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {simulationRunTableRows.map(
+                    ({ run, bill, inputLabel, planLabel, batteryLabel }) => (
+                      <tr
+                        key={run.id}
+                        className={
+                          selectedSimulationDetailRunId === run.id ? 'sim-run-row-selected' : undefined
+                        }
+                        onClick={() => setSelectedSimulationDetailRunId(run.id)}
+                      >
+                        <td>
+                          <span className="sim-run-time">
+                            {DateTime.fromISO(run.createdAt).toFormat('MMM d, yyyy h:mm a')}
+                          </span>
+                          {run.unsaved ? (
+                            <span className="sim-run-unsaved-badge" title="Preview not saved as dataset">
+                              {' '}
+                              preview
+                            </span>
+                          ) : null}
+                        </td>
+                        <td>{inputLabel}</td>
+                        <td>{planLabel}</td>
+                        <td>{batteryLabel}</td>
+                        <td className="sim-runs-num">
+                          {bill ? formatSimMoney(bill.totalCost) : '—'}
+                        </td>
+                        <td className="sim-runs-num">{bill ? formatSimMoney(bill.baseCost) : '—'}</td>
+                        <td className="sim-runs-num">
+                          {bill
+                            ? bill.peakCost > 0.000_001
+                              ? formatSimMoney(bill.peakCost)
+                              : '—'
+                            : '—'}
+                        </td>
+                        <td className="sim-runs-num">
+                          {bill ? (
+                            <>
+                              {bill.totalKwh.toFixed(2)}
+                              <span className="muted sim-runs-kwh-kind">
+                                {run.result.isSimulationGridOutput ? ' grid' : ' site'}
+                              </span>
+                            </>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="sim-runs-actions-cell" onClick={(e) => e.stopPropagation()}>
+                          <div className="sim-runs-actions">
+                            {run.unsaved && !simBusy ? (
+                              <button
+                                type="button"
+                                className="sim-run-table-btn"
+                                onClick={() => void saveBatterySimulationPreview(run.id)}
+                              >
+                                Save
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="sim-run-table-btn danger"
+                              onClick={() => removeSimulationRun(run.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ),
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {selectedSimDetailRun && selectedSimDetailPlan && (
+            <div className="sim-run-detail-panel">
+              <h4 className="sim-run-detail-heading">Details for selected run</h4>
+              <p className="muted sim-results-hint">
+                {DateTime.fromISO(selectedSimDetailRun.createdAt).toFormat('MMM d, yyyy h:mm a')} ·{' '}
+                {selectedSimDetailRun.result.isSimulationGridOutput
+                  ? 'Modeled grid import kWh'
+                  : 'Site demand kWh'}{' '}
+                · Plan <strong>{selectedSimDetailPlan.name}</strong>
+              </p>
+              <BillGridUsageAnalytics
+                dataset={selectedSimDetailRun.result}
+                plan={selectedSimDetailPlan}
+                showCost
+              />
+            </div>
+          )}
+          {selectedSimDetailRun && !selectedSimDetailPlan && (
+            <p className="muted sim-results-hint sim-run-detail-panel">
+              Selected run&apos;s rate plan is no longer available. Restore the plan or pick another row.
+            </p>
+          )}
+          {simulationRuns.length > 0 && !selectedSimulationDetailRunId && (
+            <p className="muted sim-results-hint">Select a row above to load detailed analytics.</p>
+          )}
+        </div>
       </section>
+      )}
+
+      {activeTab === 'usage' && (
+        <section className="panel">
+          <h2>Grid usage analytics</h2>
+          <p className="muted">
+            Statistics use the <strong>selected dataset</strong> and <strong>primary rate plan</strong>{' '}
+            only for period boundaries and peak windows (no dollar amounts here). Interval kWh are read
+            as <strong>site demand</strong> unless the dataset is a saved battery simulation, in which
+            case they are <strong>grid import</strong>.
+          </p>
+          <div className="row">
+            <label className="inline">
+              Primary rate plan (periods & peak windows)
+              <select
+                value={primaryPlanId ?? ''}
+                onChange={(e) => setPrimaryPlanId(e.target.value || null)}
+              >
+                <option value="">—</option>
+                {plans.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {!activeDataset ? (
+            <p className="muted">
+              Select a usage dataset above and a primary plan for grid usage statistics.
+            </p>
+          ) : !primaryPlan ? (
+            <p className="muted">Choose a primary rate plan for grid usage statistics.</p>
+          ) : (
+            <BillGridUsageAnalytics dataset={activeDataset} plan={primaryPlan} showCost={false} />
+          )}
+        </section>
+      )}
+
+      <datalist id="iana-list">
+        {IANA_SUGGESTIONS.map((z) => (
+          <option key={z} value={z} />
+        ))}
+      </datalist>
 
       <section className="panel">
         <h2>Storage</h2>
         <p className="muted">
-          Data is kept in this browser (IndexedDB). Clearing site data or using another device removes
-          it unless you add export later.
+          Usage datasets, rate plans, and battery banks are kept in this browser (IndexedDB).
+          Clearing site data or using another device removes them unless you add export later.
         </p>
         <button type="button" className="danger" onClick={() => void clearEverything()}>
-          Clear all datasets and plans
+          Clear all data
         </button>
       </section>
 

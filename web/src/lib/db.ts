@@ -1,8 +1,9 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import type { BatteryBankConfig } from './batterySimulation'
 import type { RatePlan, UsageDataset } from './types'
 
 const DB_NAME = 'demand-shift'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 interface DemandDBSchema extends DBSchema {
   datasets: {
@@ -13,6 +14,10 @@ interface DemandDBSchema extends DBSchema {
     key: string
     value: RatePlan
   }
+  batteryBanks: {
+    key: string
+    value: BatteryBankConfig
+  }
 }
 
 let dbPromise: Promise<IDBPDatabase<DemandDBSchema>> | null = null
@@ -20,9 +25,14 @@ let dbPromise: Promise<IDBPDatabase<DemandDBSchema>> | null = null
 export function getDb(): Promise<IDBPDatabase<DemandDBSchema>> {
   if (!dbPromise) {
     dbPromise = openDB<DemandDBSchema>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        db.createObjectStore('datasets', { keyPath: 'id' })
-        db.createObjectStore('plans', { keyPath: 'id' })
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('datasets', { keyPath: 'id' })
+          db.createObjectStore('plans', { keyPath: 'id' })
+        }
+        if (oldVersion < 2) {
+          db.createObjectStore('batteryBanks', { keyPath: 'id' })
+        }
       },
     })
   }
@@ -59,9 +69,28 @@ export async function deletePlan(id: string): Promise<void> {
   await db.delete('plans', id)
 }
 
+export async function listBatteryBanks(): Promise<BatteryBankConfig[]> {
+  const db = await getDb()
+  return db.getAll('batteryBanks')
+}
+
+export async function putBatteryBank(b: BatteryBankConfig): Promise<void> {
+  const db = await getDb()
+  await db.put('batteryBanks', b)
+}
+
+export async function deleteBatteryBank(id: string): Promise<void> {
+  const db = await getDb()
+  await db.delete('batteryBanks', id)
+}
+
 export async function clearAllStores(): Promise<void> {
   const db = await getDb()
-  const tx = db.transaction(['datasets', 'plans'], 'readwrite')
-  await Promise.all([tx.objectStore('datasets').clear(), tx.objectStore('plans').clear()])
+  const tx = db.transaction(['datasets', 'plans', 'batteryBanks'], 'readwrite')
+  await Promise.all([
+    tx.objectStore('datasets').clear(),
+    tx.objectStore('plans').clear(),
+    tx.objectStore('batteryBanks').clear(),
+  ])
   await tx.done
 }

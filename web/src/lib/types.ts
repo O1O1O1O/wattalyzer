@@ -48,4 +48,17 @@ export interface UsageDataset {
   /** Raw label from CSV column */
   csvTimeZone: string
   billingTimeZone: string
+  /**
+   * True when interval kWh are **grid import** (saved battery simulation output).
+   * Omitted/false: kWh are **site / household demand** suitable as simulation input.
+   */
+  isSimulationGridOutput?: boolean
+}
+
+/** Datasets that may be used as “input grid usage” for a new simulation (demand model). */
+export function isEligibleSimulationInputDataset(d: UsageDataset): boolean {
+  if (d.isSimulationGridOutput === true) return false
+  const fn = d.sourceFilename.replace(/\s*\(preview\)\s*$/i, '').trim()
+  if (fn.startsWith('simulation:')) return false
+  return true
 }
