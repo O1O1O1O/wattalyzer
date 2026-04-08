@@ -1,4 +1,4 @@
-# Demand Shift — Design Specification
+# Wattalyzer — Design Specification
 
 **Status:** Draft for implementation  
 **Date:** 2026-04-07  

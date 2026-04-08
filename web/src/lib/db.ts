@@ -2,6 +2,7 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import type { BatteryBankConfig } from './batterySimulation'
 import type { RatePlan, UsageDataset } from './types'
 
+/** Stable id so existing IndexedDB data is reused after rebrand; do not rename without migration. */
 const DB_NAME = 'demand-shift'
 const DB_VERSION = 2
 

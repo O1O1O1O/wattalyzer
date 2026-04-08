@@ -34,6 +34,7 @@ import {
 } from './lib/batterySimulation'
 import { BillGridUsageAnalytics } from './BillGridUsageAnalytics'
 
+/** localStorage keys kept as demand-shift-* so existing installs keep tab/dataset preferences. */
 const LS_DATASET = 'demand-shift-active-dataset'
 const LS_PLAN = 'demand-shift-active-plan'
 const LS_TAB = 'demand-shift-tab'
@@ -559,7 +560,7 @@ export default function App() {
   const clearEverything = async () => {
     if (
       !window.confirm(
-        'Delete all usage datasets, rate plans, and battery configurations stored in this browser for Demand Shift?',
+        'Delete all usage datasets, rate plans, and battery configurations stored in this browser for Wattalyzer?',
       )
     )
       return
@@ -631,7 +632,7 @@ export default function App() {
   return (
     <>
       <header className="app-header">
-        <h1>Demand Shift</h1>
+        <h1>Wattalyzer</h1>
         <p>
           Model site demand and rate plans, compare costs, and optionally simulate battery storage and
           grid import. Everything stays in your browser—no account, no upload to our servers.
@@ -1468,7 +1469,7 @@ export default function App() {
       </section>
 
       <footer className="app-footer">
-        Demand Shift — client-side only. Rate math follows your spec; always verify against your
+        Wattalyzer — client-side only. Rate math follows your spec; always verify against your
         utility.
       </footer>
     </>
