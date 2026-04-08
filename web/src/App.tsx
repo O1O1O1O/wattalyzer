@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { DateTime } from 'luxon'
 import './App.css'
 import { parseUsageCsv } from './lib/csvParse'
 import { resolveBillingTimeZone } from './lib/timezone'
 import type { RatePeriod, RatePlan, UsageDataset, Weekday } from './lib/types'
 import { validateRatePlan } from './lib/ratePlanValidation'
 import { computeBill } from './lib/billing'
+import { computeUsageAnalytics } from './lib/usageAnalytics'
 import { daysInBillingMonth, MONTH_NAMES } from './lib/calendar'
 import {
   clearAllStores,
@@ -87,6 +89,17 @@ function emptyPlan(): RatePlan {
 
 function formatMoney(n: number): string {
   return n.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+}
+
+function formatKwh(n: number): string {
+  return `${n.toFixed(3)} kWh`
+}
+
+function formatWindowRange(startMs: number, endMs: number, zone: string): string {
+  const a = DateTime.fromMillis(startMs, { zone })
+  const b = DateTime.fromMillis(endMs, { zone })
+  if (!a.isValid || !b.isValid) return '—'
+  return `${a.toFormat('MMM d, yyyy, h:mm a')} → ${b.toFormat('MMM d, yyyy, h:mm a')}`
 }
 
 function datasetRange(ds: UsageDataset): string {
@@ -180,6 +193,20 @@ export default function App() {
     }
     return computeBill(activeDataset.intervals, planTz)
   }, [activeDataset, comparePlan])
+
+  const usageAnalytics = useMemo(() => {
+    if (!activeDataset || !primaryPlan) return null
+    const planTz = {
+      ...primaryPlan,
+      billingTimeZone: activeDataset.billingTimeZone || primaryPlan.billingTimeZone,
+    }
+    return computeUsageAnalytics(activeDataset.intervals, planTz)
+  }, [activeDataset, primaryPlan])
+
+  const billingZoneLabel =
+    activeDataset && primaryPlan
+      ? activeDataset.billingTimeZone || primaryPlan.billingTimeZone
+      : 'America/Los_Angeles'
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -682,6 +709,148 @@ export default function App() {
                 </div>
               </div>
             )}
+          </>
+        )}
+      </section>
+
+      <section className="panel">
+        <h2>Usage by rate period</h2>
+        {!activeDataset || !primaryPlan ? (
+          <p className="muted">Select a dataset and plan to see per-period usage analytics.</p>
+        ) : (
+          <>
+            <p className="muted">
+              Rolling totals use <strong>contiguous</strong> intervals (gaps over 2 minutes start a
+              new run). If one interval is longer than the window, its share is prorated. Daily
+              figures group by interval <strong>start</strong> in the billing zone; percentiles use
+              every calendar day from the first to last in-range day in that period (zero kWh if no
+              rows). Peak stats use the same peak windows as cost.
+            </p>
+            {usageAnalytics?.map((pa) => (
+              <div key={pa.periodId} className="analytics-period">
+                <h3>Period {pa.periodLabel}</h3>
+                <table className="analytics-table">
+                  <caption>Maximum kWh in any sliding window</caption>
+                  <thead>
+                    <tr>
+                      <th>Window</th>
+                      <th>kWh</th>
+                      <th>Window (local)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pa.rollingMaxima.map((r) => (
+                      <tr key={r.windowHours}>
+                        <td>{r.windowHours} h</td>
+                        <td>{formatKwh(r.kwh)}</td>
+                        <td className="nowrap">
+                          {formatWindowRange(r.windowStartMs, r.windowEndMs, billingZoneLabel)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <table className="analytics-table">
+                  <caption>Daily total kWh (all hours)</caption>
+                  <thead>
+                    <tr>
+                      <th>Statistic</th>
+                      <th>kWh</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>Median</td>
+                      <td>{formatKwh(pa.dailyPercentiles.median)}</td>
+                    </tr>
+                    <tr>
+                      <td>75th percentile</td>
+                      <td>{formatKwh(pa.dailyPercentiles.p75)}</td>
+                    </tr>
+                    <tr>
+                      <td>90th percentile</td>
+                      <td>{formatKwh(pa.dailyPercentiles.p90)}</td>
+                    </tr>
+                    <tr>
+                      <td>95th percentile</td>
+                      <td>{formatKwh(pa.dailyPercentiles.p95)}</td>
+                    </tr>
+                    <tr>
+                      <td>Days in sample</td>
+                      <td>{pa.dailyPercentiles.dayCount}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                {pa.peak && (
+                  <table className="analytics-table">
+                    <caption>Peak window only (same rules as billing)</caption>
+                    <thead>
+                      <tr>
+                        <th>Statistic</th>
+                        <th>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Median daily kWh (peak hours)</td>
+                        <td>{formatKwh(pa.peak.dailyPercentiles.median)}</td>
+                      </tr>
+                      <tr>
+                        <td>75th percentile</td>
+                        <td>{formatKwh(pa.peak.dailyPercentiles.p75)}</td>
+                      </tr>
+                      <tr>
+                        <td>90th percentile</td>
+                        <td>{formatKwh(pa.peak.dailyPercentiles.p90)}</td>
+                      </tr>
+                      <tr>
+                        <td>95th percentile</td>
+                        <td>{formatKwh(pa.peak.dailyPercentiles.p95)}</td>
+                      </tr>
+                      <tr>
+                        <td>Days in peak sample</td>
+                        <td>{pa.peak.dailyPercentiles.dayCount}</td>
+                      </tr>
+                      <tr>
+                        <td>Max daily kWh (peak hours)</td>
+                        <td>
+                          {formatKwh(pa.peak.maxDailyPeakKwh)}
+                          {pa.peak.maxDailyPeakDate ? (
+                            <span className="muted">
+                              {' '}
+                              (
+                              {DateTime.fromISO(pa.peak.maxDailyPeakDate, {
+                                zone: billingZoneLabel,
+                              }).toFormat('MMM d, yyyy')}
+                              )
+                            </span>
+                          ) : null}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Max 1 h usage (peak hours only)</td>
+                        <td>
+                          {formatKwh(pa.peak.maxOneHourPeakKwh)}
+                          {pa.peak.maxOneHourPeakWindowStartMs != null ? (
+                            <span className="muted">
+                              {' '}
+                              (
+                              {formatWindowRange(
+                                pa.peak.maxOneHourPeakWindowStartMs,
+                                pa.peak.maxOneHourPeakWindowEndMs ??
+                                  pa.peak.maxOneHourPeakWindowStartMs + 3600 * 1000,
+                                billingZoneLabel,
+                              )}
+                              )
+                            </span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            ))}
           </>
         )}
       </section>

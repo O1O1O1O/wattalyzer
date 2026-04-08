@@ -243,6 +243,59 @@ input[type='number'] {
   }
 }
 
+.analytics-period {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.analytics-period:first-of-type {
+  margin-top: 0.5rem;
+  padding-top: 0;
+  border-top: none;
+}
+
+.analytics-period h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  margin-bottom: 1rem;
+}
+
+.analytics-table caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.35rem 0;
+  color: var(--muted);
+}
+
+.analytics-table th,
+.analytics-table td {
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.analytics-table th {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  .analytics-table th {
+    background: rgba(255, 255, 255, 0.06);
+  }
+}
+
+.analytics-table .nowrap {
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
 footer.app-footer {
   margin-top: 2rem;
   padding-top: 1rem;
