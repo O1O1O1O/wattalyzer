@@ -62,7 +62,7 @@ export function normalizeBatteryBank(b: BatteryBankConfig): BatteryBankConfig {
 }
 
 /**
- * Simulated grid-side kWh per interval: home load minus battery discharge during peak,
+ * Analyze-modeled grid-side kWh per interval: home load minus battery discharge during peak,
  * plus grid charging off-peak until SOC reaches max. SOC starts at min (empty to usable floor).
  */
 export function simulateBatteryGridUsage(

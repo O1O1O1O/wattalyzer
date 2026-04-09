@@ -435,6 +435,51 @@ input[type='number'] {
 }
 
 .dataset-list li,
+a.plan-schedule-link {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-right: 0.35rem;
+}
+
+.plan-port-row {
+  margin-bottom: 0.35rem;
+}
+
+.plan-builtin-select {
+  min-width: 14rem;
+}
+
+.plan-builtin-desc {
+  margin: 0.15rem 0 0.65rem;
+  font-size: 0.82rem;
+  max-width: 42rem;
+}
+
+.plan-port-success {
+  margin: 0.5rem 0 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  font-size: 0.85rem;
+}
+
+.plan-url-field {
+  flex-basis: 100%;
+  align-items: flex-start;
+}
+
+@media (min-width: 640px) {
+  .plan-url-field {
+    flex-basis: auto;
+  }
+}
+
+.plan-url-preview {
+  margin: 0 0 0.65rem;
+  font-size: 0.82rem;
+}
+
 .plan-list li {
   display: flex;
   flex-wrap: wrap;

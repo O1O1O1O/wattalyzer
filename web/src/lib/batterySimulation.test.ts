@@ -27,6 +27,7 @@ describe('simulateBatteryGridUsage', () => {
   }
   const plan: RatePlan = {
     id: 'p',
+    scheduleId: 'sch',
     name: 'T',
     billingTimeZone: zone,
     periods: [summer],

@@ -1,4 +1,4 @@
-import type { RatePeriod, RatePlan } from './types'
+import type { RatePeriod, RatePlan, RateSchedule } from './types'
 import { daysInBillingMonth } from './calendar'
 
 function compareMd(
@@ -74,9 +74,39 @@ function monthName(m: number): string {
   return names[m - 1] ?? String(m)
 }
 
+export function validateOptionalHttpUrl(url: string | undefined): string | null {
+  if (url == null || url.trim() === '') return null
+  const t = url.trim()
+  try {
+    const u = new URL(t)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return 'URL must start with http:// or https://'
+    }
+    return null
+  } catch {
+    return 'URL must be a valid http(s) URL'
+  }
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+export function validateRateSchedule(schedule: RateSchedule): string[] {
+  const errors: string[] = []
+  if (!schedule.name.trim()) errors.push('Schedule name is required')
+  const urlErr = validateOptionalHttpUrl(schedule.sourceUrl)
+  if (urlErr) errors.push(urlErr)
+  if (schedule.effectiveDate?.trim()) {
+    if (!ISO_DATE.test(schedule.effectiveDate.trim())) {
+      errors.push('Effective date must be YYYY-MM-DD')
+    }
+  }
+  return errors
+}
+
 export function validateRatePlan(plan: RatePlan): string[] {
   const errors: string[] = []
 
+  if (!plan.scheduleId.trim()) errors.push('Rate plan must belong to a schedule')
   if (!plan.name.trim()) errors.push('Plan name is required')
   if (!plan.billingTimeZone.trim()) errors.push('Billing time zone is required')
   if (plan.periods.length === 0) errors.push('Add at least one rate period')

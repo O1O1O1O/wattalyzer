@@ -1,0 +1,60 @@
+{
+  "wattalyzerRateSchedules": true,
+  "version": 2,
+  "schedules": [
+    {
+      "name": "Southern Nevada residential (Apr 2026 bill insert)",
+      "sourceUrl": "https://www.nvenergy.com/publish/content/dam/nvenergy/bill_inserts/2026/04_apr/np_res_rate-4_1_30.pdf",
+      "effectiveDate": "2026-04-01",
+      "description": "NV Energy published residential examples on this insert. Confirm rates and eligibility for your account.",
+      "plans": [
+        {
+          "name": "NV Basic Rates April 2026",
+          "billingTimeZone": "America/Los_Angeles",
+          "periods": [
+            {
+              "startMonth": 1,
+              "startDay": 1,
+              "endMonth": 12,
+              "endDay": 31,
+              "baseRatePerKwh": 0.11822
+            }
+          ]
+        },
+        {
+          "name": "NV TOU Rates April 2026",
+          "billingTimeZone": "America/Los_Angeles",
+          "periods": [
+            {
+              "startMonth": 1,
+              "startDay": 1,
+              "endMonth": 5,
+              "endDay": 31,
+              "baseRatePerKwh": 0.08858
+            },
+            {
+              "startMonth": 6,
+              "startDay": 1,
+              "endMonth": 9,
+              "endDay": 30,
+              "baseRatePerKwh": 0.07505,
+              "peak": {
+                "ratePerKwh": 0.47355,
+                "weekdays": [1, 2, 3, 4, 5, 6, 7],
+                "startTime": "18:00",
+                "endTime": "21:00"
+              }
+            },
+            {
+              "startMonth": 10,
+              "startDay": 1,
+              "endMonth": 12,
+              "endDay": 31,
+              "baseRatePerKwh": 0.08858
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

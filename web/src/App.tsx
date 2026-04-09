@@ -7,10 +7,16 @@ import {
   isEligibleSimulationInputDataset,
   type RatePeriod,
   type RatePlan,
+  type RateSchedule,
   type UsageDataset,
   type Weekday,
 } from './lib/types'
-import { validateRatePlan } from './lib/ratePlanValidation'
+import { validateRatePlan, validateRateSchedule } from './lib/ratePlanValidation'
+import {
+  buildWattalyzerScheduleBundleExport,
+  parseWattalyzerImportJsonText,
+} from './lib/rateScheduleJson'
+import { BUILTIN_SCHEDULE_BUNDLES, parseBuiltinScheduleBundle } from './resources/builtinRatePlans'
 import { computeBill, type BillSummary } from './lib/billing'
 import { daysInBillingMonth, MONTH_NAMES } from './lib/calendar'
 import {
@@ -18,12 +24,15 @@ import {
   deleteBatteryBank,
   deleteDataset,
   deletePlan,
+  deleteScheduleCascade,
   listBatteryBanks,
   listDatasets,
   listPlans,
+  listSchedules,
   putBatteryBank,
   putDataset,
   putPlan,
+  putSchedule,
 } from './lib/db'
 import {
   DEFAULT_BATTERY,
@@ -120,12 +129,20 @@ function clampDayAfterMonthChange(newMonth: number, prevDay: number): number {
   return Math.min(prevDay, max)
 }
 
-function emptyPlan(): RatePlan {
+function emptyPlan(scheduleId: string): RatePlan {
   return {
     id: newId(),
+    scheduleId,
     name: 'My rate plan',
     billingTimeZone: 'America/Los_Angeles',
     periods: [defaultPeriod()],
+  }
+}
+
+function emptySchedule(): RateSchedule {
+  return {
+    id: newId(),
+    name: 'New rate schedule',
   }
 }
 
@@ -139,6 +156,18 @@ function emptyBattery(): BatteryBankConfig {
 
 function formatSimMoney(n: number): string {
   return n.toLocaleString(undefined, { style: 'currency', currency: 'USD' })
+}
+
+function downloadJsonFile(filename: string, text: string) {
+  const blob = new Blob([text], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 function pickSimulationSourceId(dsList: UsageDataset[], preferred: string | null): string | null {
@@ -162,6 +191,7 @@ function datasetRange(ds: UsageDataset): string {
 
 export default function App() {
   const [datasets, setDatasets] = useState<UsageDataset[]>([])
+  const [schedules, setSchedules] = useState<RateSchedule[]>([])
   const [plans, setPlans] = useState<RatePlan[]>([])
   const [batteries, setBatteries] = useState<BatteryBankConfig[]>([])
   const [activeTab, setActiveTab] = useState<AppTab>('usage')
@@ -171,7 +201,7 @@ export default function App() {
   const [simPlanId, setSimPlanId] = useState<string | null>(null)
   const [simBatteryId, setSimBatteryId] = useState<string | null>(null)
   const [simulationRuns, setSimulationRuns] = useState<SimulationRunRecord[]>([])
-  /** Which simulation result row shows full bill + sliding-window / peak analytics below. */
+  /** Which analyze result row shows full bill + sliding-window / peak analytics below. */
   const [selectedSimulationDetailRunId, setSelectedSimulationDetailRunId] = useState<string | null>(
     null,
   )
@@ -181,9 +211,16 @@ export default function App() {
   const [planErrors, setPlanErrors] = useState<string[]>([])
   const [batteryErrors, setBatteryErrors] = useState<string[]>([])
   const [draftPlan, setDraftPlan] = useState<RatePlan | null>(null)
+  const [draftSchedule, setDraftSchedule] = useState<RateSchedule | null>(null)
+  const [scheduleErrors, setScheduleErrors] = useState<string[]>([])
   const [draftBattery, setDraftBattery] = useState<BatteryBankConfig | null>(null)
   /** In-memory label while typing; persisted on blur only (avoids IDB + full reload per keystroke). */
   const [datasetLabelDraftById, setDatasetLabelDraftById] = useState<Record<string, string>>({})
+  const [planPortMessage, setPlanPortMessage] = useState<{
+    kind: 'success' | 'error'
+    text: string
+  } | null>(null)
+  const [builtinImportSlug, setBuiltinImportSlug] = useState('')
 
   useEffect(() => {
     const ids = new Set(datasets.map((d) => d.id))
@@ -201,10 +238,16 @@ export default function App() {
   }, [datasets])
 
   const reloadStores = useCallback(async () => {
-    const [ds, ps, bsRaw] = await Promise.all([listDatasets(), listPlans(), listBatteryBanks()])
+    const [ds, ps, bsRaw, sch] = await Promise.all([
+      listDatasets(),
+      listPlans(),
+      listBatteryBanks(),
+      listSchedules(),
+    ])
     const bs = bsRaw.map(normalizeBatteryBank)
     setDatasets(ds)
     setPlans(ps)
+    setSchedules(sch)
     setBatteries(bs)
     setActiveDatasetId((cur) => (cur && ds.some((d) => d.id === cur) ? cur : ds[0]?.id ?? null))
     setPrimaryPlanId((cur) => (cur && ps.some((p) => p.id === cur) ? cur : ps[0]?.id ?? null))
@@ -221,10 +264,16 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      const [ds, ps, bsRaw] = await Promise.all([listDatasets(), listPlans(), listBatteryBanks()])
+      const [ds, ps, bsRaw, sch] = await Promise.all([
+        listDatasets(),
+        listPlans(),
+        listBatteryBanks(),
+        listSchedules(),
+      ])
       const bs = bsRaw.map(normalizeBatteryBank)
       setDatasets(ds)
       setPlans(ps)
+      setSchedules(sch)
       setBatteries(bs)
       const ad = localStorage.getItem(LS_DATASET)
       const ap = localStorage.getItem(LS_PLAN)
@@ -307,9 +356,25 @@ export default function App() {
     }
   }, [simulationRuns, selectedSimulationDetailRunId])
 
+  const selectedBuiltinDescription = useMemo(
+    () => BUILTIN_SCHEDULE_BUNDLES.find((b) => b.slug === builtinImportSlug)?.description,
+    [builtinImportSlug],
+  )
+
+  const scheduleById = useMemo(() => {
+    const m = new Map<string, RateSchedule>()
+    for (const s of schedules) m.set(s.id, s)
+    return m
+  }, [schedules])
+
+  const sortedSchedules = useMemo(() => {
+    return [...schedules].sort((a, b) => a.name.localeCompare(b.name))
+  }, [schedules])
+
   const simulationRunTableRows = useMemo(() => {
     return simulationRuns.map((run) => {
       const plan = plans.find((p) => p.id === run.config.planId) ?? null
+      const sched = plan ? (scheduleById.get(plan.scheduleId) ?? null) : null
       const srcDataset = datasets.find((d) => d.id === run.config.sourceId) ?? null
       const battery =
         run.config.batteryId != null
@@ -329,12 +394,17 @@ export default function App() {
         run,
         bill,
         inputLabel: srcDataset?.label ?? '— (dataset removed)',
-        planLabel: plan?.name ?? '— (plan removed)',
+        planLabel:
+          plan == null
+            ? '— (plan removed)'
+            : sched
+              ? `${sched.name} — ${plan.name}`
+              : plan.name,
         batteryLabel:
           run.config.batteryId == null ? 'None' : (battery?.name ?? '— (battery removed)'),
       }
     })
-  }, [simulationRuns, plans, datasets, batteries])
+  }, [simulationRuns, plans, datasets, batteries, scheduleById])
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -384,9 +454,38 @@ export default function App() {
     await reloadStores()
   }
 
-  const openNewPlan = () => {
+  const openNewSchedule = () => {
+    setScheduleErrors([])
+    setDraftSchedule(emptySchedule())
+  }
+
+  const openEditSchedule = (s: RateSchedule) => {
+    setScheduleErrors([])
+    setDraftSchedule(structuredClone(s))
+  }
+
+  const saveDraftSchedule = async () => {
+    if (!draftSchedule) return
+    const errs = validateRateSchedule(draftSchedule)
+    setScheduleErrors(errs)
+    if (errs.length > 0) return
+    await putSchedule(draftSchedule)
+    await reloadStores()
+    setDraftSchedule(null)
+  }
+
+  const removeSchedule = async (id: string) => {
+    if (!window.confirm('Delete this rate schedule and all plans inside it?')) return
+    const removedPlanIds = new Set(plans.filter((p) => p.scheduleId === id).map((p) => p.id))
+    await deleteScheduleCascade(id)
+    await reloadStores()
+    if (primaryPlanId && removedPlanIds.has(primaryPlanId)) setPrimaryPlanId(null)
+    if (simPlanId && removedPlanIds.has(simPlanId)) setSimPlanId(null)
+  }
+
+  const openNewPlanForSchedule = (scheduleId: string) => {
     setPlanErrors([])
-    setDraftPlan(emptyPlan())
+    setDraftPlan(emptyPlan(scheduleId))
   }
 
   const openEditPlan = (p: RatePlan) => {
@@ -411,6 +510,97 @@ export default function App() {
     await reloadStores()
     if (primaryPlanId === id) setPrimaryPlanId(null)
     if (simPlanId === id) setSimPlanId(null)
+  }
+
+  const exportScheduleRatePlans = (schedule: RateSchedule) => {
+    setPlanPortMessage(null)
+    const picked = plans.filter((p) => p.scheduleId === schedule.id)
+    if (picked.length === 0) {
+      setPlanPortMessage({ kind: 'error', text: 'No plans in this schedule to export.' })
+      return
+    }
+    const metaSchedule: RateSchedule = {
+      id: 'export-validation',
+      name: schedule.name,
+      sourceUrl: schedule.sourceUrl,
+      effectiveDate: schedule.effectiveDate,
+      description: schedule.description,
+      notes: schedule.notes,
+    }
+    const metaErrs = validateRateSchedule(metaSchedule)
+    if (metaErrs.length > 0) {
+      setPlanPortMessage({ kind: 'error', text: metaErrs.join('; ') })
+      return
+    }
+    const stamp = new Date().toISOString().slice(0, 10)
+    downloadJsonFile(
+      `wattalyzer-rate-schedules-${stamp}.json`,
+      buildWattalyzerScheduleBundleExport(
+        {
+          name: schedule.name.trim(),
+          sourceUrl: metaSchedule.sourceUrl,
+          effectiveDate: metaSchedule.effectiveDate,
+          description: metaSchedule.description,
+          notes: metaSchedule.notes,
+        },
+        picked,
+      ),
+    )
+    setPlanPortMessage({
+      kind: 'success',
+      text: `Exported schedule "${schedule.name.trim()}" with ${picked.length} plan(s).`,
+    })
+  }
+
+  const onRatePlanImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    setPlanPortMessage(null)
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    const text = await f.text()
+    const r = parseWattalyzerImportJsonText(text)
+    if (!r.ok) {
+      setPlanPortMessage({ kind: 'error', text: r.error })
+      return
+    }
+    for (const b of r.bundles) {
+      await putSchedule(b.schedule)
+      for (const p of b.plans) {
+        await putPlan(p)
+      }
+    }
+    await reloadStores()
+    if (r.plans.length > 0) {
+      setPrimaryPlanId(r.plans[r.plans.length - 1]!.id)
+    }
+    setPlanPortMessage({
+      kind: 'success',
+      text: `Imported ${r.scheduleCount} schedule(s), ${r.plans.length} plan(s).`,
+    })
+  }
+
+  const importBuiltinScheduleEntry = async () => {
+    setPlanPortMessage(null)
+    if (!builtinImportSlug) return
+    const r = parseBuiltinScheduleBundle(builtinImportSlug)
+    if (!r.ok) {
+      setPlanPortMessage({ kind: 'error', text: r.error })
+      return
+    }
+    for (const s of r.schedules) {
+      await putSchedule(s)
+    }
+    for (const p of r.plans) {
+      await putPlan(p)
+    }
+    await reloadStores()
+    if (r.plans.length > 0) {
+      setPrimaryPlanId(r.plans[r.plans.length - 1]!.id)
+    }
+    setPlanPortMessage({
+      kind: 'success',
+      text: `Imported ${r.schedules.length} schedule(s), ${r.plans.length} plan(s).`,
+    })
   }
 
   const openNewBattery = () => {
@@ -560,7 +750,7 @@ export default function App() {
   const clearEverything = async () => {
     if (
       !window.confirm(
-        'Delete all usage datasets, rate plans, and battery configurations stored in this browser for Wattalyzer?',
+        'Delete all usage datasets, rate schedules, rate plans, and battery configurations stored in this browser for Wattalyzer?',
       )
     )
       return
@@ -634,7 +824,7 @@ export default function App() {
       <header className="app-header">
         <h1>Wattalyzer</h1>
         <p>
-          Model site demand and rate plans, compare costs, and optionally simulate battery storage and
+          Model site demand and rate plans, compare costs, and optionally analyze battery storage and
           grid import. Everything stays in your browser—no account, no upload to our servers.
         </p>
       </header>
@@ -666,7 +856,7 @@ export default function App() {
           className={`tab${activeTab === 'simulation' ? ' tab-active' : ''}`}
           onClick={() => setActiveTab('simulation')}
         >
-          Simulation
+          Analyze
         </button>
       </nav>
 
@@ -677,13 +867,13 @@ export default function App() {
           CSV must include <code>Usage</code>, <code>TimeZone</code>, and either{' '}
           <code>startTime</code>/<code>endTime</code> or the split date/time columns. Invalid rows
           are rejected. Each row’s kWh is treated as <strong>site demand</strong> (total household
-          load for that interval)—the input expected for battery simulation. If a <code>Cost</code>{' '}
-          column exists, values are stored per row but are not used on this tab.
+          load for that interval)—the input the Analyze tab expects for site demand. If a{' '}
+          <code>Cost</code> column exists, values are stored per row but are not used on this tab.
         </p>
         <p className="muted">
           Datasets saved from a battery run contain <strong>grid import</strong> kWh only (net meter
           draw after the battery). Those rows are labeled below and are <strong>not</strong> offered as
-          simulation inputs.
+          Analyze inputs.
         </p>
         <div className="row">
           <label className="file-btn">
@@ -723,7 +913,8 @@ export default function App() {
                       const raw = e.currentTarget.value.trim()
                       const next = raw.length > 0 ? raw : d.label
                       setDatasetLabelDraftById((prev) => {
-                        const { [d.id]: _, ...rest } = prev
+                        const rest = { ...prev }
+                        delete rest[d.id]
                         return rest
                       })
                       void persistDatasetLabel(d.id, next)
@@ -735,9 +926,9 @@ export default function App() {
                   {d.intervals.length.toLocaleString()} intervals · {datasetRange(d)}
                 </span>
                 {d.isSimulationGridOutput ? (
-                  <span className="dataset-kind">Grid import (sim output)</span>
+                  <span className="dataset-kind">Grid import (Analyze output)</span>
                 ) : (
-                  <span className="dataset-kind">Site demand (sim input)</span>
+                  <span className="dataset-kind">Site demand (Analyze input)</span>
                 )}
                 <span className="muted">CSV TZ: {d.csvTimeZone || '—'}</span>
                 <label className="inline">
@@ -763,39 +954,251 @@ export default function App() {
       {activeTab === 'plans' && (
       <>
       <section className="panel">
-        <h2>Rate plans</h2>
+        <h2>Rate schedules &amp; plans</h2>
         <p className="muted">
-          Periods must cover Jan 1–Dec 31 with no gaps or overlap. Pick the month first, then the
-          day (February always has 28 days here). Feb 29 cannot be a boundary; leap-day usage uses Feb
-          28’s period. Peak times: start exclusive, end inclusive; overnight allowed.
+          A <strong>rate schedule</strong> is a published tariff version (link, effective date) that
+          contains one or more <strong>rate plans</strong> (flat, TOU, etc.). Periods must cover Jan
+          1–Dec 31 with no gaps or overlap. Pick the month first, then the day (February always has 28
+          days here). Feb 29 cannot be a boundary; leap-day usage uses Feb 28’s period. Peak times:
+          start exclusive, end inclusive; overnight allowed.
         </p>
         <div className="row">
-          <button type="button" className="primary" onClick={openNewPlan}>
-            New plan
+          <button type="button" className="primary" onClick={openNewSchedule}>
+            New schedule
           </button>
         </div>
-        {plans.length > 0 && (
-          <ul className="plan-list">
-            {plans.map((p) => (
-              <li key={p.id}>
-                <strong>{p.name}</strong>
-                <span className="muted">{p.billingTimeZone}</span>
-                <button type="button" onClick={() => openEditPlan(p)}>
-                  Edit
-                </button>
-                <button type="button" className="danger" onClick={() => void removePlan(p.id)}>
-                  Delete
-                </button>
-              </li>
+
+        <h3 className="panel-subh">Share (JSON)</h3>
+        <div className="row plan-port-row" style={{ flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
+          <select
+            className="plan-builtin-select"
+            aria-label="Built-in schedule"
+            value={builtinImportSlug}
+            onChange={(e) => setBuiltinImportSlug(e.target.value)}
+          >
+            <option value="">Choose…</option>
+            {BUILTIN_SCHEDULE_BUNDLES.map((b) => (
+              <option key={b.slug} value={b.slug}>
+                {b.label}
+              </option>
             ))}
-          </ul>
+          </select>
+          <button
+            type="button"
+            disabled={!builtinImportSlug}
+            onClick={() => void importBuiltinScheduleEntry()}
+          >
+            Import Builtin schedule
+          </button>
+        </div>
+        {selectedBuiltinDescription ? (
+          <p className="muted plan-builtin-desc">{selectedBuiltinDescription}</p>
+        ) : null}
+        <div className="row plan-port-row">
+          <label className="file-btn">
+            <input
+              type="file"
+              accept="application/json,.json"
+              onChange={(e) => void onRatePlanImportFile(e)}
+            />
+            Import Schedule from file
+          </label>
+        </div>
+
+        {planPortMessage && (
+          <p
+            className={planPortMessage.kind === 'error' ? 'error-box' : 'plan-port-success'}
+            role="status"
+            style={{ marginTop: '0.75rem' }}
+          >
+            {planPortMessage.text}
+          </p>
+        )}
+
+        {schedules.length === 0 ? (
+          <p className="muted" style={{ marginTop: '1rem' }}>
+            No rate schedules yet. Create one to add plans.
+          </p>
+        ) : (
+          <div style={{ marginTop: '1.25rem' }}>
+            {sortedSchedules.map((s) => {
+              const schPlans = plans.filter((p) => p.scheduleId === s.id)
+              return (
+                <div key={s.id} className="period-card" style={{ marginBottom: '1rem' }}>
+                  <div className="row" style={{ flexWrap: 'wrap', alignItems: 'baseline' }}>
+                    <h3 style={{ margin: 0 }}>{s.name}</h3>
+                    {s.effectiveDate ? (
+                      <span className="muted">Effective {s.effectiveDate}</span>
+                    ) : null}
+                    {s.sourceUrl ? (
+                      <a
+                        href={s.sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="plan-schedule-link"
+                      >
+                        Tariff source
+                      </a>
+                    ) : null}
+                    <button type="button" onClick={() => openEditSchedule(s)}>
+                      Edit schedule
+                    </button>
+                    <button type="button" className="danger" onClick={() => void removeSchedule(s.id)}>
+                      Delete schedule
+                    </button>
+                    <button type="button" className="primary" onClick={() => openNewPlanForSchedule(s.id)}>
+                      New plan in this schedule
+                    </button>
+                    <button
+                      type="button"
+                      disabled={schPlans.length === 0}
+                      onClick={() => exportScheduleRatePlans(s)}
+                    >
+                      Export schedule
+                    </button>
+                  </div>
+                  {s.description ? <p className="muted" style={{ margin: '0.35rem 0 0' }}>{s.description}</p> : null}
+                  {s.notes ? (
+                    <p className="muted" style={{ margin: '0.25rem 0 0', whiteSpace: 'pre-wrap' }}>
+                      {s.notes}
+                    </p>
+                  ) : null}
+                  {schPlans.length === 0 ? (
+                    <p className="muted" style={{ marginTop: '0.5rem' }}>
+                      No plans in this schedule yet.
+                    </p>
+                  ) : (
+                    <ul className="plan-list" style={{ marginTop: '0.5rem' }}>
+                      {schPlans.map((p) => (
+                        <li key={p.id}>
+                          <strong>{p.name}</strong>
+                          <span className="muted">{p.billingTimeZone}</span>
+                          <button type="button" onClick={() => openEditPlan(p)}>
+                            Edit
+                          </button>
+                          <button type="button" className="danger" onClick={() => void removePlan(p.id)}>
+                            Delete
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )
+            })}
+          </div>
         )}
       </section>
+
+      {draftSchedule && (
+        <section className="panel">
+          <h2>
+            {schedules.some((x) => x.id === draftSchedule.id) ? 'Edit schedule' : 'New schedule'}
+          </h2>
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <label className="inline">
+              Name
+              <input
+                type="text"
+                value={draftSchedule.name}
+                onChange={(e) => setDraftSchedule({ ...draftSchedule, name: e.target.value })}
+              />
+            </label>
+            <label className="inline plan-url-field">
+              Source URL (optional)
+              <input
+                type="url"
+                inputMode="url"
+                placeholder="https://…"
+                value={draftSchedule.sourceUrl ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value.trim()
+                  setDraftSchedule({
+                    ...draftSchedule,
+                    sourceUrl: v === '' ? undefined : e.target.value,
+                  })
+                }}
+                style={{ width: 'min(100%, 24rem)' }}
+              />
+            </label>
+            <label className="inline">
+              Effective date (optional)
+              <input
+                type="text"
+                placeholder="YYYY-MM-DD"
+                value={draftSchedule.effectiveDate ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value.trim()
+                  setDraftSchedule({
+                    ...draftSchedule,
+                    effectiveDate: v === '' ? undefined : e.target.value,
+                  })
+                }}
+                style={{ width: '8rem' }}
+              />
+            </label>
+          </div>
+          <label className="block" style={{ display: 'block', marginTop: '0.5rem' }}>
+            <span className="muted">Description (optional)</span>
+            <textarea
+              value={draftSchedule.description ?? ''}
+              onChange={(e) =>
+                setDraftSchedule({
+                  ...draftSchedule,
+                  description: e.target.value.trim() === '' ? undefined : e.target.value,
+                })
+              }
+              rows={2}
+              style={{ display: 'block', width: 'min(100%, 36rem)', marginTop: '0.25rem' }}
+            />
+          </label>
+          <label className="block" style={{ display: 'block', marginTop: '0.5rem' }}>
+            <span className="muted">Notes (optional)</span>
+            <textarea
+              value={draftSchedule.notes ?? ''}
+              onChange={(e) =>
+                setDraftSchedule({
+                  ...draftSchedule,
+                  notes: e.target.value.trim() === '' ? undefined : e.target.value,
+                })
+              }
+              rows={3}
+              style={{ display: 'block', width: 'min(100%, 36rem)', marginTop: '0.25rem' }}
+            />
+          </label>
+          <div className="row" style={{ marginTop: '0.75rem' }}>
+            <button type="button" className="primary" onClick={() => void saveDraftSchedule()}>
+              Save schedule
+            </button>
+            <button type="button" onClick={() => setDraftSchedule(null)}>
+              Cancel
+            </button>
+          </div>
+          {scheduleErrors.length > 0 && (
+            <div className="error-box" style={{ marginTop: '0.5rem' }}>
+              {scheduleErrors.join('\n')}
+            </div>
+          )}
+        </section>
+      )}
 
       {draftPlan && (
         <section className="panel">
           <h2>{plans.some((p) => p.id === draftPlan.id) ? 'Edit plan' : 'New plan'}</h2>
-          <div className="row">
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <label className="inline">
+              Schedule
+              <select
+                value={draftPlan.scheduleId}
+                onChange={(e) => setDraftPlan({ ...draftPlan, scheduleId: e.target.value })}
+              >
+                {schedules.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="inline">
               Name
               <input
@@ -815,6 +1218,34 @@ export default function App() {
               />
             </label>
           </div>
+          <label className="block" style={{ display: 'block', marginTop: '0.5rem' }}>
+            <span className="muted">Description (optional)</span>
+            <textarea
+              value={draftPlan.description ?? ''}
+              onChange={(e) =>
+                setDraftPlan({
+                  ...draftPlan,
+                  description: e.target.value.trim() === '' ? undefined : e.target.value,
+                })
+              }
+              rows={2}
+              style={{ display: 'block', width: 'min(100%, 36rem)', marginTop: '0.25rem' }}
+            />
+          </label>
+          <label className="block" style={{ display: 'block', marginTop: '0.5rem' }}>
+            <span className="muted">Notes (optional)</span>
+            <textarea
+              value={draftPlan.notes ?? ''}
+              onChange={(e) =>
+                setDraftPlan({
+                  ...draftPlan,
+                  notes: e.target.value.trim() === '' ? undefined : e.target.value,
+                })
+              }
+              rows={3}
+              style={{ display: 'block', width: 'min(100%, 36rem)', marginTop: '0.25rem' }}
+            />
+          </label>
           {draftPlan.periods.map((period, i) => (
             <div key={period.id} className="period-card">
               <h3>Period {i + 1}</h3>
@@ -1012,8 +1443,8 @@ export default function App() {
           Total capacity is nameplate kWh. Min/max SOC bound usable energy (defaults 10%–90%). Charging
           efficiency is grid-to-stored; AC conversion is stored DC to AC at the home. Max charge rate
           limits grid-to-battery power; max power out limits AC from the battery to the home (SOC falls
-          by delivered AC kWh ÷ η_ac). The simulator never charges during peak; it recharges toward max
-          SOC off-peak after peaks end.
+          by delivered AC kWh ÷ η_ac). The battery model on the Analyze tab never charges during peak;
+          it recharges toward max SOC off-peak after peaks end.
         </p>
         <div className="row">
           <button type="button" className="primary" onClick={openNewBattery}>
@@ -1185,7 +1616,7 @@ export default function App() {
 
       {activeTab === 'simulation' && (
       <section className="panel">
-        <h2>Simulation</h2>
+        <h2>Analyze</h2>
         <p className="muted">
           Tie <strong>site demand</strong> to a <strong>rate plan</strong> for cost and{' '}
           <strong>grid usage</strong> statistics, and optionally <strong>battery storage</strong> to get{' '}
@@ -1195,21 +1626,21 @@ export default function App() {
         <ol className="sim-steps muted">
           <li>
             Select an <strong>input usage</strong> dataset: interval kWh are treated as{' '}
-            <strong>total site / household demand</strong>. Saved simulation outputs (grid import only)
+            <strong>total site / household demand</strong>. Saved Analyze outputs (grid import only)
             are excluded from this list.
           </li>
           <li>Select the <strong>rate plan</strong> used for billing and window statistics for each run.</li>
           <li>
-            Optionally select a <strong>battery bank</strong>. <strong>Simulate</strong> models SOC, no
-            charging during peak, recharge after peak, and max charge / max power out, producing{' '}
+            Optionally select a <strong>battery bank</strong>; <strong>Analyze</strong> then models SOC,
+            no charging during peak, recharge after peak, and max charge / max power out, producing{' '}
             <strong>grid import</strong> kWh per interval. Use <strong>Save</strong> on that row in the
-            results table to store a battery preview as a dataset (not valid as a later simulation input).
+            results table to store a battery preview as a dataset (not valid as a later Analyze input).
             With battery{' '}
             <strong>None</strong>, each run records <strong>site demand</strong> against the chosen plan.
           </li>
           <li>
-            Each <strong>Simulate</strong> adds a row to the <strong>results table</strong> below with
-            inputs and bill summary so you can compare runs side by side.
+            Each run of <strong>Analyze</strong> adds a row to the <strong>results table</strong> below
+            with inputs and bill summary so you can compare runs side by side.
           </li>
         </ol>
         <div className="row">
@@ -1234,11 +1665,14 @@ export default function App() {
               onChange={(e) => setSimPlanId(e.target.value || null)}
             >
               <option value="">—</option>
-              {plans.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
+              {plans.map((p) => {
+                const sch = scheduleById.get(p.scheduleId)
+                return (
+                  <option key={p.id} value={p.id}>
+                    {sch ? `${sch.name} — ${p.name}` : p.name}
+                  </option>
+                )
+              })}
             </select>
           </label>
           <label className="inline">
@@ -1263,7 +1697,7 @@ export default function App() {
             disabled={simBusy || !simSourceId || !simPlanId}
             onClick={() => void runSimulation()}
           >
-            {simBusy ? 'Running…' : 'Simulate'}
+            {simBusy ? 'Analyzing…' : 'Analyze'}
           </button>
           {simBusy && (
             <span className="sim-busy" role="status" aria-live="polite">
@@ -1277,7 +1711,7 @@ export default function App() {
         )}
 
         <div className="sim-results-panel">
-          <h3 className="sim-results-heading">Simulation results</h3>
+          <h3 className="sim-results-heading">Analyze results</h3>
           <p className="muted sim-results-hint">
             Bill figures use each run&apos;s rate plan and interval kWh (site demand or modeled grid
             import). <strong>Total kWh</strong> is billed energy for that run. Peak cost shows{' '}
@@ -1285,7 +1719,7 @@ export default function App() {
             analytics (estimated bill breakdown, sliding-window kWh distributions, peak-window stats).
           </p>
           {simulationRuns.length === 0 ? (
-            <p className="muted sim-results-hint">Run <strong>Simulate</strong> to add a comparison row.</p>
+            <p className="muted sim-results-hint">Run <strong>Analyze</strong> to add a comparison row.</p>
           ) : (
             <div className="sim-runs-table-wrap">
               <table className="analytics-table sim-runs-table">
@@ -1391,7 +1825,7 @@ export default function App() {
               <p className="muted sim-results-hint">
                 {DateTime.fromISO(selectedSimDetailRun.createdAt).toFormat('MMM d, yyyy h:mm a')} ·{' '}
                 {selectedSimDetailRun.result.isSimulationGridOutput
-                  ? 'Modeled grid import kWh'
+                  ? 'Grid import kWh (Analyze)'
                   : 'Site demand kWh'}{' '}
                 · Plan <strong>{selectedSimDetailPlan.name}</strong>
               </p>
@@ -1420,7 +1854,7 @@ export default function App() {
           <p className="muted">
             Statistics use the <strong>selected dataset</strong> and <strong>primary rate plan</strong>{' '}
             only for period boundaries and peak windows (no dollar amounts here). Interval kWh are read
-            as <strong>site demand</strong> unless the dataset is a saved battery simulation, in which
+            as <strong>site demand</strong> unless the dataset is grid import saved from Analyze, in which
             case they are <strong>grid import</strong>.
           </p>
           <div className="row">
@@ -1431,11 +1865,14 @@ export default function App() {
                 onChange={(e) => setPrimaryPlanId(e.target.value || null)}
               >
                 <option value="">—</option>
-                {plans.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
+                {plans.map((p) => {
+                  const sch = scheduleById.get(p.scheduleId)
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {sch ? `${sch.name} — ${p.name}` : p.name}
+                    </option>
+                  )
+                })}
               </select>
             </label>
           </div>
@@ -1460,7 +1897,8 @@ export default function App() {
       <section className="panel">
         <h2>Storage</h2>
         <p className="muted">
-          Usage datasets, rate plans, and battery banks are kept in this browser (IndexedDB).
+          Usage datasets, rate schedules, rate plans, and battery banks are kept in this browser
+          (IndexedDB).
           Clearing site data or using another device removes them unless you add export later.
         </p>
         <button type="button" className="danger" onClick={() => void clearEverything()}>

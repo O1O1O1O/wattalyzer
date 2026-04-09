@@ -1,73 +1,45 @@
-# React + TypeScript + Vite
+# Wattalyzer
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Client-side web app for exploring **interval electricity usage** (CSV) against **user-defined rate plans**, with optional **battery storage analysis** on the **Analyze** tab (modeled grid import). Everything runs in the browser: no account, no backend.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **Usage data** — Import CSV with `Usage`, `TimeZone`, and interval timestamps; store multiple datasets, rename labels, set billing time zone per dataset.
+- **Rate plans** — Define named plans with calendar periods (Jan 1–Dec 31 coverage), base $/kWh, optional peak windows; optional **rate schedule URL** (opens in a new tab in the list and when editing).
+- **Plan sharing** — **Export all plans** to a JSON file; **import** from that Wattalyzer format, a `{ "plans": [...] }` file, or a single plan object. **Built-in templates** ship under `src/resources/rate-plans/` and are registered in `src/resources/builtinRatePlans.ts`.
+- **Battery banks** — Configure capacity, efficiency, limits; **Analyze** tab runs a simple dispatch model and records results in a comparison table.
+- **Analytics** — Estimated bill (base/peak/total), sliding-window kWh distributions, peak-only stats; Analyze rows link to full detail for a selected run.
+- **Storage** — Datasets, plans, and batteries persist in **IndexedDB**; UI preferences use **localStorage**. **Clear all data** wipes local stores.
 
-## React Compiler
+Billing math is for exploration only—always verify against your utility.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Requirements
 
-## Expanding the ESLint configuration
+- [Node.js](https://nodejs.org/) (LTS recommended)
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Scripts
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+From this directory (`web/`):
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+| Command           | Description                            |
+| ----------------- | -------------------------------------- |
+| `npm install`     | Install dependencies                   |
+| `npm run dev`     | Vite dev server (HMR)                  |
+| `npm run build`   | Typecheck + production build → `dist/` |
+| `npm run preview` | Serve the production build locally     |
+| `npm test`        | Vitest unit tests                      |
+| `npm run lint`    | ESLint                                 |
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Project layout
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- `src/App.tsx` — Main UI and tab shell
+- `src/lib/` — CSV parsing, billing, rate-plan validation, `ratePlanJson` (import/export), usage analytics, IndexedDB, battery analysis (`batterySimulation` module)
+- `src/resources/rate-plans/` — Built-in JSON plan templates (+ README)
+- `src/resources/builtinRatePlans.ts` — Built-in list and import helper
+- `src/BillGridUsageAnalytics.tsx` — Shared bill + grid analytics block
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Design notes: [`../docs/superpowers/specs/2026-04-07-demand-shift-design.md`](../docs/superpowers/specs/2026-04-07-demand-shift-design.md)
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+## Stack
+
+React 19, TypeScript, Vite, Luxon, Papa Parse, idb.

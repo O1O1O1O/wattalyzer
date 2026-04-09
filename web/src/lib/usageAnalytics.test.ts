@@ -65,6 +65,7 @@ describe('computeUsageAnalytics', () => {
   }
   const plan: RatePlan = {
     id: 'p',
+    scheduleId: 'sch',
     name: 'T',
     billingTimeZone: 'America/Los_Angeles',
     periods: [fullYear],
@@ -107,6 +108,7 @@ describe('computeUsageAnalytics', () => {
     }
     const p: RatePlan = {
       id: 'p',
+      scheduleId: 'sch',
       name: 'T',
       billingTimeZone: zone,
       periods: [summer],

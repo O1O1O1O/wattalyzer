@@ -19,11 +19,27 @@ export interface RatePeriod {
   peak?: PeakConfig
 }
 
+/** Published tariff / insert grouping; links one or more {@link RatePlan} options. */
+export interface RateSchedule {
+  id: string
+  name: string
+  /** Utility PDF or web page for this tariff version. */
+  sourceUrl?: string
+  /** ISO calendar date (YYYY-MM-DD) when this version applies. */
+  effectiveDate?: string
+  description?: string
+  notes?: string
+}
+
 export interface RatePlan {
   id: string
+  /** Parent rate schedule (tariff bundle). */
+  scheduleId: string
   name: string
   /** IANA zone e.g. America/Los_Angeles */
   billingTimeZone: string
+  description?: string
+  notes?: string
   periods: RatePeriod[]
 }
 
@@ -49,13 +65,13 @@ export interface UsageDataset {
   csvTimeZone: string
   billingTimeZone: string
   /**
-   * True when interval kWh are **grid import** (saved battery simulation output).
-   * Omitted/false: kWh are **site / household demand** suitable as simulation input.
+   * True when interval kWh are **grid import** (saved battery output from Analyze).
+   * Omitted/false: kWh are **site / household demand** suitable as Analyze input.
    */
   isSimulationGridOutput?: boolean
 }
 
-/** Datasets that may be used as “input grid usage” for a new simulation (demand model). */
+/** Datasets that may be used as “input grid usage” for a new Analyze run (demand model). */
 export function isEligibleSimulationInputDataset(d: UsageDataset): boolean {
   if (d.isSimulationGridOutput === true) return false
   const fn = d.sourceFilename.replace(/\s*\(preview\)\s*$/i, '').trim()

@@ -78,6 +78,7 @@ describe('findPeriodForCalendarDate', () => {
   ]
   const plan: RatePlan = {
     id: 'p',
+    scheduleId: 'sch',
     name: 'Test',
     billingTimeZone: zone,
     periods,
@@ -110,6 +111,7 @@ describe('computeBill', () => {
   ]
   const plan: RatePlan = {
     id: 'p',
+    scheduleId: 'sch',
     name: 'Flat+peak',
     billingTimeZone: zone,
     periods: fullYear,
