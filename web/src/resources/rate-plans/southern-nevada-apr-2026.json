@@ -9,7 +9,7 @@
       "description": "NV Energy published residential examples on this insert. Confirm rates and eligibility for your account.",
       "plans": [
         {
-          "name": "NV Basic Rates April 2026",
+          "name": "Single Family Residential",
           "billingTimeZone": "America/Los_Angeles",
           "periods": [
             {
@@ -22,7 +22,8 @@
           ]
         },
         {
-          "name": "NV TOU Rates April 2026",
+          "name": "Optional Residential Single Family Time-of-Use",
+          "description": "• Summer on-peak: June 1 – Sept. 30, from 6:01 p.m. to\n9 p.m. daily\n• Summer off-peak: June 1 – Sept. 30, all other hours\n• Winter: All winter hours, Oct. – May ",
           "billingTimeZone": "America/Los_Angeles",
           "periods": [
             {

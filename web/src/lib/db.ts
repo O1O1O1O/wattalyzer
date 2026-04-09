@@ -6,7 +6,8 @@ import type { RatePlan, RateSchedule, UsageDataset } from './types'
 const DB_NAME = 'demand-shift'
 const DB_VERSION = 3
 
-const LEGACY_SCHEDULE_ID = 'migration-legacy-schedule'
+/** Hidden from the rate-plans UI; plans may still reference it from pre-schedule migrations. */
+export const LEGACY_SCHEDULE_ID = 'migration-legacy-schedule'
 
 interface DemandDBSchema extends DBSchema {
   datasets: {

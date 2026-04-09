@@ -13,7 +13,8 @@ export interface RollingWindowSummaryRow {
   windowHours: SummaryWindowHours
   /** Display label e.g. "1hr" */
   label: string
-  min: number
+  /** Arithmetic mean of sliding-window kWh samples. */
+  mean: number
   median: number
   p75: number
   p90: number
@@ -196,11 +197,12 @@ function rollingWindowSummaryStats(values: number[]): Omit<
   'windowHours' | 'label' | 'maxWindowStartMs' | 'maxWindowEndMs'
 > {
   if (values.length === 0) {
-    return { min: 0, median: 0, p75: 0, p90: 0, p95: 0, max: 0, sampleCount: 0 }
+    return { mean: 0, median: 0, p75: 0, p90: 0, p95: 0, max: 0, sampleCount: 0 }
   }
   const s = [...values].sort((a, b) => a - b)
+  const sum = values.reduce((acc, v) => acc + v, 0)
   return {
-    min: s[0]!,
+    mean: sum / values.length,
     max: s[s.length - 1]!,
     median: percentileLinear(s, 50),
     p75: percentileLinear(s, 75),
@@ -219,7 +221,7 @@ function rollingWindowSummaryFromSamples(
     return {
       windowHours,
       label,
-      min: 0,
+      mean: 0,
       median: 0,
       p75: 0,
       p90: 0,

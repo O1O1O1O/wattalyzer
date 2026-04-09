@@ -81,7 +81,7 @@ describe('computeUsageAnalytics', () => {
     const [a] = computeUsageAnalytics(intervals, plan)
     expect(a.periodId).toBe('y')
     expect(a.rollingWindowSummary.length).toBe(SUMMARY_WINDOW_HOURS.length)
-    expect(a.rollingWindowSummary[0]!.max).toBeGreaterThanOrEqual(a.rollingWindowSummary[0]!.min)
+    expect(a.rollingWindowSummary[0]!.max).toBeGreaterThanOrEqual(a.rollingWindowSummary[0]!.mean)
     const r0 = a.rollingWindowSummary[0]!
     expect(r0.maxWindowStartMs).not.toBeNull()
     expect(r0.maxWindowEndMs).not.toBeNull()

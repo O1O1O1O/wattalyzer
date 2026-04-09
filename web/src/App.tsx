@@ -26,6 +26,7 @@ import {
   deletePlan,
   deleteScheduleCascade,
   listBatteryBanks,
+  LEGACY_SCHEDULE_ID,
   listDatasets,
   listPlans,
   listSchedules,
@@ -367,9 +368,14 @@ export default function App() {
     return m
   }, [schedules])
 
+  const visibleSchedules = useMemo(
+    () => schedules.filter((s) => s.id !== LEGACY_SCHEDULE_ID),
+    [schedules],
+  )
+
   const sortedSchedules = useMemo(() => {
-    return [...schedules].sort((a, b) => a.name.localeCompare(b.name))
-  }, [schedules])
+    return [...visibleSchedules].sort((a, b) => a.name.localeCompare(b.name))
+  }, [visibleSchedules])
 
   const simulationRunTableRows = useMemo(() => {
     return simulationRuns.map((run) => {
@@ -1015,7 +1021,7 @@ export default function App() {
           </p>
         )}
 
-        {schedules.length === 0 ? (
+        {visibleSchedules.length === 0 ? (
           <p className="muted" style={{ marginTop: '1rem' }}>
             No rate schedules yet. Create one to add plans.
           </p>
@@ -1070,15 +1076,35 @@ export default function App() {
                   ) : (
                     <ul className="plan-list" style={{ marginTop: '0.5rem' }}>
                       {schPlans.map((p) => (
-                        <li key={p.id}>
-                          <strong>{p.name}</strong>
-                          <span className="muted">{p.billingTimeZone}</span>
-                          <button type="button" onClick={() => openEditPlan(p)}>
-                            Edit
-                          </button>
-                          <button type="button" className="danger" onClick={() => void removePlan(p.id)}>
-                            Delete
-                          </button>
+                        <li
+                          key={p.id}
+                          style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.35rem' }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              alignItems: 'center',
+                              gap: '0.5rem 0.75rem',
+                            }}
+                          >
+                            <strong>{p.name}</strong>
+                            <span className="muted">{p.billingTimeZone}</span>
+                            <button type="button" onClick={() => openEditPlan(p)}>
+                              Edit
+                            </button>
+                            <button type="button" className="danger" onClick={() => void removePlan(p.id)}>
+                              Delete
+                            </button>
+                          </div>
+                          {p.description ? (
+                            <p
+                              className="muted"
+                              style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: '0.82rem' }}
+                            >
+                              {p.description}
+                            </p>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -1192,11 +1218,15 @@ export default function App() {
                 value={draftPlan.scheduleId}
                 onChange={(e) => setDraftPlan({ ...draftPlan, scheduleId: e.target.value })}
               >
-                {schedules.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
+                {schedules
+                  .filter(
+                    (s) => s.id !== LEGACY_SCHEDULE_ID || draftPlan.scheduleId === LEGACY_SCHEDULE_ID,
+                  )
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
               </select>
             </label>
             <label className="inline">
@@ -1219,7 +1249,7 @@ export default function App() {
             </label>
           </div>
           <label className="block" style={{ display: 'block', marginTop: '0.5rem' }}>
-            <span className="muted">Description (optional)</span>
+            <span className="muted">Description (optional, multi-line)</span>
             <textarea
               value={draftPlan.description ?? ''}
               onChange={(e) =>
@@ -1228,7 +1258,7 @@ export default function App() {
                   description: e.target.value.trim() === '' ? undefined : e.target.value,
                 })
               }
-              rows={2}
+              rows={4}
               style={{ display: 'block', width: 'min(100%, 36rem)', marginTop: '0.25rem' }}
             />
           </label>

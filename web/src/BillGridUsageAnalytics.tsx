@@ -53,8 +53,7 @@ export function BillGridUsageAnalytics({
   const billingZoneLabel = dataset.billingTimeZone || plan.billingTimeZone
 
   const intervalKwhLabel = useMemo(() => {
-    if (dataset.isSimulationGridOutput) return 'Grid import (kWh)'
-    return 'Site demand (kWh)'
+    return 'kWh'
   }, [dataset.isSimulationGridOutput])
 
   const energyKindShort = useMemo(() => {
@@ -112,7 +111,7 @@ export function BillGridUsageAnalytics({
             <thead>
               <tr>
                 <th scope="col">Window</th>
-                <th scope="col">Min (kWh)</th>
+                <th scope="col">Mean (kWh)</th>
                 <th scope="col">Median (kWh)</th>
                 <th scope="col">75pc (kWh)</th>
                 <th scope="col">90pc (kWh)</th>
@@ -124,7 +123,7 @@ export function BillGridUsageAnalytics({
               {pa.rollingWindowSummary.map((row) => (
                 <tr key={row.windowHours}>
                   <td>{row.label}</td>
-                  <td>{formatKwhTable(row.min)}</td>
+                  <td>{formatKwhTable(row.mean)}</td>
                   <td>{formatKwhTable(row.median)}</td>
                   <td>{formatKwhTable(row.p75)}</td>
                   <td>{formatKwhTable(row.p90)}</td>
